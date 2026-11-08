@@ -264,6 +264,12 @@ else()
     # configure takes the launcher and compiler as one value ("ccache gcc")
     string(JOIN " " FFmpeg_CC ${CMAKE_C_COMPILER_LAUNCHER} ${CMAKE_C_COMPILER})
     string(JOIN " " FFmpeg_CXX ${CMAKE_CXX_COMPILER_LAUNCHER} ${CMAKE_CXX_COMPILER})
+    # MinGW needs the compiler driver to link (it adds the C runtime); plain ld cannot
+    if (MINGW)
+        set(FFmpeg_LD ${CMAKE_C_COMPILER})
+    else()
+        set(FFmpeg_LD ${CMAKE_LINKER})
+    endif()
     add_custom_command(
         OUTPUT
             ${FFmpeg_MAKEFILE}
@@ -284,7 +290,7 @@ else()
                 --enable-pic
                 --cc=${FFmpeg_CC}
                 --cxx=${FFmpeg_CXX}
-                --ld=${CMAKE_LINKER}
+                --ld=${FFmpeg_LD}
                 --extra-cflags=${CMAKE_C_FLAGS}
                 --extra-cxxflags=${CMAKE_CXX_FLAGS}
                 --extra-ldflags=${CMAKE_C_LINK_FLAGS}
