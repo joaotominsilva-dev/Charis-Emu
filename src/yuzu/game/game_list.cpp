@@ -253,7 +253,31 @@ void GameList::OnTextChanged(const QString& new_text) {
         tree_view->ApplyFilter(edit_filter_text, item_model);
     } else {
         grid_view->ApplyFilter(edit_filter_text, item_model);
+        carousel_view->ApplyFilter(edit_filter_text, item_model);
     }
+}
+
+void GameList::RefreshFilter() {
+    OnTextChanged(search_field->filterText());
+    m_currentView->viewport()->update();
+}
+
+void GameList::SetShowHiddenGames(bool show) {
+    UISettings::values.show_hidden_games = show;
+    RefreshFilter();
+    emit SaveConfig();
+}
+
+void GameList::ToggleHidden(u64 program_id) {
+    auto& hidden = UISettings::values.hidden_ids;
+    if (hidden.contains(program_id)) {
+        hidden.removeAll(program_id);
+    } else {
+        hidden.append(program_id);
+    }
+    RefreshFilter();
+    emit HiddenGamesChanged(static_cast<int>(hidden.size()));
+    emit SaveConfig();
 }
 
 void GameList::OnFilterCloseClicked() {
@@ -262,6 +286,8 @@ void GameList::OnFilterCloseClicked() {
 
 void GameList::OnPopulatingCompleted(const QStringList& watch_list) {
     emit ShowList(!item_model->IsEmpty());
+    RefreshFilter();
+    emit HiddenGamesChanged(static_cast<int>(UISettings::values.hidden_ids.size()));
 
     // favorites row
     if (m_isTreeMode) {
@@ -457,6 +483,13 @@ void GameList::PopupContextMenu(const QPoint& menu_location) {
 void GameList::AddGamePopup(QMenu& context_menu, u64 program_id, const std::string& path) {
     // TODO(crueter): Refactor this and make it less bad
     QAction* favorite = context_menu.addAction(tr("Favorite"));
+    const bool is_hidden = UISettings::values.hidden_ids.contains(program_id);
+    QAction* hide_game = context_menu.addAction(is_hidden
+                                                    ? QStringLiteral("Mostrar na tela inicial")
+                                                    : QStringLiteral("Ocultar da tela inicial"));
+    hide_game->setVisible(program_id != 0);
+    connect(hide_game, &QAction::triggered, this,
+            [this, program_id]() { ToggleHidden(program_id); });
     context_menu.addSeparator();
     QAction* start_game = context_menu.addAction(tr("Start Game"));
     QAction* start_game_global =

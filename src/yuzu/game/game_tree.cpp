@@ -110,7 +110,14 @@ int GameTree::FilterClosedResultCount(GameListModel* model) {
         const int children_count = folder->rowCount();
         for (int j = 0; j < children_count; ++j) {
             ++children_total;
-            setRowHidden(j, folder_index, false);
+            setRowHidden(j, folder_index, Yuzu::IsGameHidden(folder->child(j, 0)));
+        }
+    }
+
+    // Favorites live in row 0 and follow the same hidden rule.
+    if (auto* favorites = model->item(0, 0)) {
+        for (int j = 0; j < favorites->rowCount(); ++j) {
+            setRowHidden(j, favorites->index(), Yuzu::IsGameHidden(favorites->child(j, 0)));
         }
     }
 
@@ -139,7 +146,7 @@ void GameTree::ApplyFilter(const QString& edit_filter_text, GameListModel* model
 
             const QStandardItem* child = folder->child(j, 0);
 
-            if (Yuzu::FilterMatches(edit_filter_text, child)) {
+            if (!Yuzu::IsGameHidden(child) && Yuzu::FilterMatches(edit_filter_text, child)) {
                 setRowHidden(j, folder_index, false);
                 ++result_count;
             } else {

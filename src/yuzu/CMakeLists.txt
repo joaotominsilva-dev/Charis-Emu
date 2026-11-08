@@ -217,6 +217,7 @@ add_executable(yuzu
     user_data_migration.h user_data_migration.cpp
 
     charis_header.h charis_header.cpp
+    game_clock_dialog.h game_clock_dialog.cpp
 
     yuzu.qrc
     yuzu.rc

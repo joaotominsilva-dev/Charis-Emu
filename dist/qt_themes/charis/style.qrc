@@ -30,6 +30,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
     <qresource prefix="charis">
         <file>style.qss</file>
+        <file>charis.png</file>
         <file alias="fonts/Archivo-Regular.ttf">fonts/Archivo-400.ttf</file>
         <file alias="fonts/Archivo-SemiBold.ttf">fonts/Archivo-600.ttf</file>
         <file alias="fonts/Archivo-Bold.ttf">fonts/Archivo-700.ttf</file>

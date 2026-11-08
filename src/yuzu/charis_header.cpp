@@ -8,6 +8,8 @@
 #include <QIcon>
 #include <QLabel>
 #include <QLocale>
+#include <QPushButton>
+#include <QSignalBlocker>
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -30,7 +32,7 @@ CharisHeader::CharisHeader(QWidget* parent) : QWidget(parent) {
     top_row->setSpacing(12);
 
     auto* icon = new QLabel(body);
-    icon->setPixmap(QIcon(QStringLiteral(":/icons/default/256x256/eglantine.png"))
+    icon->setPixmap(QIcon(QStringLiteral(":charis/charis.png"))
                         .pixmap(QSize(30, 30)));
     top_row->addWidget(icon);
 
@@ -39,9 +41,25 @@ CharisHeader::CharisHeader(QWidget* parent) : QWidget(parent) {
     top_row->addWidget(brand);
     top_row->addStretch(1);
 
-    auto* pill = new QLabel(QStringLiteral("●  PC · Switch 2"), body);
-    pill->setObjectName(QStringLiteral("CharisPill"));
-    top_row->addWidget(pill);
+    hidden_button = new QPushButton(body);
+    hidden_button->setObjectName(QStringLiteral("CharisPillButton"));
+    hidden_button->setCheckable(true);
+    hidden_button->setCursor(Qt::PointingHandCursor);
+    hidden_button->setToolTip(QStringLiteral("Mostrar ou esconder os jogos que você ocultou"));
+    connect(hidden_button, &QPushButton::toggled, this, [this](bool show) {
+        SetHiddenCount(property("hidden_count").toInt());
+        emit ShowHiddenToggled(show);
+    });
+    top_row->addWidget(hidden_button);
+    SetHiddenCount(0);
+
+    game_clock_button = new QPushButton(body);
+    game_clock_button->setObjectName(QStringLiteral("CharisPillButton"));
+    game_clock_button->setCursor(Qt::PointingHandCursor);
+    game_clock_button->setToolTip(QStringLiteral("Mudar a data e a hora que os jogos veem"));
+    connect(game_clock_button, &QPushButton::clicked, this, &CharisHeader::GameClockClicked);
+    top_row->addWidget(game_clock_button);
+    SetGameClockText(QStringLiteral("hora do PC"));
 
     clock = new QLabel(body);
     clock->setObjectName(QStringLiteral("CharisClock"));
@@ -89,6 +107,28 @@ void CharisHeader::Track(QWidget* page_, QList<QWidget*> watched_) {
 void CharisHeader::SetThemeActive(bool active) {
     theme_active = active;
     UpdateVisibility();
+}
+
+void CharisHeader::SetGameClockText(const QString& text) {
+    game_clock_button->setText(QStringLiteral("Hora do jogo: ") + text);
+}
+
+void CharisHeader::SetHiddenCount(int count) {
+    setProperty("hidden_count", count);
+    if (count == 0) {
+        hidden_button->setText(QStringLiteral("Nenhum jogo oculto"));
+    } else if (hidden_button->isChecked()) {
+        hidden_button->setText(QStringLiteral("Esconder ocultos (%1)").arg(count));
+    } else {
+        hidden_button->setText(QStringLiteral("Ver ocultos (%1)").arg(count));
+    }
+    hidden_button->setEnabled(count > 0 || hidden_button->isChecked());
+}
+
+void CharisHeader::SetShowHidden(bool show) {
+    const QSignalBlocker blocker(hidden_button);
+    hidden_button->setChecked(show);
+    SetHiddenCount(property("hidden_count").toInt());
 }
 
 bool CharisHeader::eventFilter(QObject* object, QEvent* event) {

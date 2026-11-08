@@ -6,9 +6,20 @@
 #include <QStandardItem>
 #include <QStringList>
 
+#include "qt_common/config/uisettings.h"
 #include "qt_common/game_list/game_list_p.h"
 
 namespace Yuzu {
+
+inline bool IsGameMarkedHidden(const QStandardItem* item) {
+    const u64 program_id = item->data(GameListItemPath::ProgramIdRole).toULongLong();
+    return program_id != 0 && UISettings::values.hidden_ids.contains(program_id);
+}
+
+// Hidden games stay out of the home screen unless the user asked to see them.
+inline bool IsGameHidden(const QStandardItem* item) {
+    return !UISettings::values.show_hidden_games.GetValue() && IsGameMarkedHidden(item);
+}
 
 inline bool ContainsAllWords(const QString& haystack, const QString& userinput) {
     const QStringList userinput_split = userinput.split(QLatin1Char{' '}, Qt::SkipEmptyParts);

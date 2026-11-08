@@ -1,10 +1,12 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <QFontMetrics>
 #include <QPainter>
 #include <QPainterPath>
 #include "game_card.h"
 #include "qt_common/config/uisettings.h"
+#include "qt_common/game_list/game_list_p.h"
 
 GameCard::GameCard(QObject* parent) : QStyledItemDelegate{parent} {
     setObjectName("GameCard");
@@ -18,7 +20,8 @@ void GameCard::paint(QPainter* painter, const QStyleOptionViewItem& option,
     painter->save();
     painter->setRenderHint(QPainter::Antialiasing);
 
-    constexpr int cardCornerRadius = 10;
+    const bool charis = UISettings::values.theme == std::string("charis");
+    const int cardCornerRadius = charis ? 18 : 10;
 
     const QRect cardRect = getCardRect(option, index);
 
@@ -27,13 +30,32 @@ void GameCard::paint(QPainter* painter, const QStyleOptionViewItem& option,
     QColor borderColor = palette.dark().color();
     QColor textColor = palette.text().color();
 
-    // highlight on select or hover
-    if (option.state & QStyle::State_Selected) {
+    if (charis) {
+        backgroundColor = QColor(0xE9, 0xEA, 0xDD);
+        borderColor = backgroundColor;
+        textColor = QColor(0x1D, 0x1E, 0x19);
+        if (option.state & QStyle::State_Selected) {
+            backgroundColor = QColor(0x20, 0x21, 0x1C);
+            borderColor = backgroundColor;
+            textColor = QColor(0xF3, 0xF4, 0xEA);
+        } else if (option.state & QStyle::State_MouseOver) {
+            backgroundColor = QColor(0xDE, 0xDF, 0xD1);
+            borderColor = backgroundColor;
+        }
+    } else if (option.state & QStyle::State_Selected) {
+        // highlight on select or hover
         backgroundColor = palette.highlight().color();
         borderColor = palette.highlight().color().lighter(150);
         textColor = palette.highlightedText().color();
     } else if (option.state & QStyle::State_MouseOver) {
         backgroundColor = backgroundColor.lighter(120);
+    }
+
+    // A hidden game only shows up when "show hidden" is on; it is drawn faded with a tag.
+    const u64 program_id = index.data(GameListItemPath::ProgramIdRole).toULongLong();
+    const bool marked_hidden = program_id != 0 && UISettings::values.hidden_ids.contains(program_id);
+    if (marked_hidden) {
+        painter->setOpacity(0.45);
     }
 
     painter->setBrush(backgroundColor);
@@ -78,6 +100,22 @@ void GameCard::paint(QPainter* painter, const QStyleOptionViewItem& option,
         painter->setFont(font);
 
         painter->drawText(textRect, Qt::AlignHCenter | Qt::AlignTop | Qt::TextWordWrap, title);
+    }
+
+    if (marked_hidden) {
+        painter->setOpacity(1.0);
+        QFont tag_font = option.font;
+        tag_font.setBold(true);
+        tag_font.setPixelSize(11);
+        painter->setFont(tag_font);
+        const QString tag = QStringLiteral("OCULTO");
+        const int tag_w = QFontMetrics(tag_font).horizontalAdvance(tag) + 20;
+        const QRect tag_rect(iconRect.left() + 8, iconRect.top() + 8, tag_w, 22);
+        painter->setPen(Qt::NoPen);
+        painter->setBrush(QColor(0x20, 0x21, 0x1C));
+        painter->drawRoundedRect(tag_rect, 11, 11);
+        painter->setPen(QColor(0xF3, 0xF4, 0xEA));
+        painter->drawText(tag_rect, Qt::AlignCenter, tag);
     }
 
     painter->restore();

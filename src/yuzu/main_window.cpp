@@ -45,6 +45,7 @@
 #include <QFontDatabase>
 #include <QVBoxLayout>
 #include "yuzu/charis_header.h"
+#include "yuzu/game_clock_dialog.h"
 #include "yuzu/game/game_list.h"
 #include "yuzu/nup_dialogs.h"
 
@@ -421,6 +422,16 @@ MainWindow::MainWindow(bool has_broken_vulkan)
     QIcon::setFallbackSearchPaths(QStringList(QStringLiteral(":/icons")));
 
     default_theme_paths = QIcon::themeSearchPaths();
+
+    // First start of Charis Switch on a config that came from elsewhere (for example the
+    // PokeDinner folder the installer imported): switch it to the Charis look once.
+    if (!UISettings::values.charis_initialized.GetValue()) {
+        UISettings::values.theme = "charis";
+        UISettings::values.game_list_mode = Settings::GameListMode::GridView;
+        UISettings::values.game_icon_size = 256;
+        UISettings::values.charis_initialized = true;
+    }
+
     UpdateUITheme();
 
     SetDiscordEnabled(UISettings::values.enable_discord_presence.GetValue());
@@ -961,6 +972,21 @@ void MainWindow::InitializeWidgets() {
     game_list_placeholder->setVisible(false);
 
     charis_header->Track(library_page, {game_list, game_list_placeholder});
+
+    charis_header->SetShowHidden(UISettings::values.show_hidden_games.GetValue());
+    charis_header->SetHiddenCount(static_cast<int>(UISettings::values.hidden_ids.size()));
+    connect(charis_header, &CharisHeader::ShowHiddenToggled, game_list,
+            &GameList::SetShowHiddenGames);
+    connect(game_list, &GameList::HiddenGamesChanged, charis_header,
+            &CharisHeader::SetHiddenCount);
+    connect(charis_header, &CharisHeader::GameClockClicked, this,
+            &MainWindow::OnOpenGameClock);
+    UpdateGameClockLabel();
+
+    auto* game_clock_action = new QAction(QStringLiteral("Data e hora do jogo..."), this);
+    connect(game_clock_action, &QAction::triggered, this, &MainWindow::OnOpenGameClock);
+    ui->menu_Emulation->addSeparator();
+    ui->menu_Emulation->addAction(game_clock_action);
 
     loading_screen = new LoadingScreen(this);
     loading_screen->hide();
@@ -5066,6 +5092,30 @@ void MainWindow::UpdateUITheme() {
 
     if (charis_header) {
         charis_header->SetThemeActive(is_charis);
+    }
+}
+
+void MainWindow::OnOpenGameClock() {
+    GameClockDialog dialog(Settings::values.custom_rtc_enabled.GetValue(),
+                           Settings::values.custom_rtc_offset.GetValue(), emulation_running, this);
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+
+    const bool enabled = dialog.IsCustomEnabled();
+    const qint64 offset = dialog.OffsetSeconds();
+    Settings::values.custom_rtc_enabled.SetValue(enabled);
+    Settings::values.custom_rtc_offset.SetValue(offset);
+    Settings::values.custom_rtc.SetValue(QDateTime::currentSecsSinceEpoch() + offset);
+    config->SaveAllValues();
+    UpdateGameClockLabel();
+}
+
+void MainWindow::UpdateGameClockLabel() {
+    if (charis_header) {
+        charis_header->SetGameClockText(
+            GameClockDialog::Describe(Settings::values.custom_rtc_enabled.GetValue(),
+                                      Settings::values.custom_rtc_offset.GetValue()));
     }
 }
 

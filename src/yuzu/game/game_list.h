@@ -88,6 +88,10 @@ public:
 
     void ResetViewMode();
 
+    /// Re-applies the search text and the hidden-games rule to the current view
+    void RefreshFilter();
+    void SetShowHiddenGames(bool show);
+
 public slots:
     void SetNupConversionRunning(bool running);
     void RefreshGameDirectory();
@@ -119,6 +123,7 @@ signals:
     void ShowList(bool show);
     void PopulatingCompleted();
     void SaveConfig();
+    void HiddenGamesChanged(int hidden_count);
 
 private slots:
     void OnTextChanged(const QString& new_text);
@@ -134,6 +139,7 @@ private:
     void ValidateEntry(const QModelIndex& item);
 
     void ToggleFavorite(u64 program_id);
+    void ToggleHidden(u64 program_id);
 
     void PopupContextMenu(const QPoint& menu_location);
     void AddGamePopup(QMenu& context_menu, u64 program_id, const std::string& path);

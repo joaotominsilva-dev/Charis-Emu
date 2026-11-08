@@ -1249,3 +1249,116 @@ QGroupBox QTextEdit, QGroupBox QPlainTextEdit {
 QGroupBox QLineEdit:focus, QGroupBox QAbstractSpinBox:focus, QGroupBox QComboBox:focus {
     background-color: #FFFFFF;
 }
+
+QPushButton#CharisPillButton {
+    background-color: #2C2D27;
+    color: #C8C9B7;
+    border-radius: 12px;
+    padding: 6px 14px;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+QPushButton#CharisPillButton:hover {
+    background-color: #3A3B34;
+    color: #F3F4EA;
+}
+
+QPushButton#CharisPillButton:checked {
+    background-color: #F3F4EA;
+    color: #1D1E19;
+}
+
+QPushButton#CharisPillButton:disabled {
+    background-color: #2C2D27;
+    color: #5E604F;
+}
+
+QDialog#GameClockDialog QLabel#DialogEyebrow {
+    color: #55564B;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 2px;
+}
+
+QDialog#GameClockDialog QLabel#DialogTitle {
+    color: #1D1E19;
+    font-size: 26px;
+    font-weight: 800;
+}
+
+QDialog#GameClockDialog QLabel#DialogText {
+    color: #55564B;
+    font-size: 14px;
+}
+
+QDialog#GameClockDialog QLabel#DialogPreview {
+    background-color: #20211C;
+    color: #F3F4EA;
+    border-radius: 16px;
+    padding: 14px 18px;
+    font-size: 15px;
+    font-weight: 700;
+}
+
+QDialog#GameClockDialog QLabel#DialogNote {
+    color: #953521;
+    font-size: 13px;
+}
+
+QDialog#GameClockDialog QRadioButton {
+    background-color: #E9EADD;
+    border-radius: 16px;
+    padding: 14px 16px;
+    font-size: 15px;
+    font-weight: 700;
+}
+
+QDialog#GameClockDialog QRadioButton:checked {
+    background-color: #DEDFD1;
+}
+
+QDialog#GameClockDialog QDateTimeEdit {
+    font-size: 16px;
+    font-weight: 700;
+    padding: 10px 14px;
+}
+
+QDialog#GameClockDialog QPushButton#QuickButton {
+    background-color: #E9EADD;
+    color: #1D1E19;
+    padding: 7px 14px;
+    border-radius: 12px;
+    font-weight: 700;
+}
+
+QDialog#GameClockDialog QPushButton#QuickButton:hover {
+    background-color: #DEDFD1;
+}
+
+QDialog#GameClockDialog QPushButton#SecondaryButton {
+    background-color: #E9EADD;
+    color: #1D1E19;
+}
+
+QCalendarWidget QWidget {
+    alternate-background-color: #E9EADD;
+}
+
+QCalendarWidget QToolButton {
+    background-color: transparent;
+    color: #1D1E19;
+    padding: 4px 8px;
+}
+
+QCalendarWidget QAbstractItemView:enabled {
+    background-color: #F3F4EA;
+    color: #1D1E19;
+    selection-background-color: #20211C;
+    selection-color: #F3F4EA;
+}
+
+QDateTimeEdit::drop-down {
+    border: none;
+    width: 28px;
+}

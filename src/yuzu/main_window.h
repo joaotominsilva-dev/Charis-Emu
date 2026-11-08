@@ -373,6 +373,8 @@ private slots:
     void OnMenuInstallToNAND();
     void OnMenuRecentFile();
     void OnConfigure();
+    void OnOpenGameClock();
+    void UpdateGameClockLabel();
     void OnConfigureTas();
     void OnDecreaseVolume();
     void OnIncreaseVolume();

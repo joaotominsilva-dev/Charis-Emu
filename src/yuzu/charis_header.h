@@ -7,6 +7,7 @@
 #include <QWidget>
 
 class QLabel;
+class QPushButton;
 class QTimer;
 
 // Graphite top area of the Charis layout: brand, clock and greeting, ending in the
@@ -22,6 +23,15 @@ public:
     void Track(QWidget* page, QList<QWidget*> watched);
     void SetThemeActive(bool active);
 
+    // Text of the "game clock" button: the PC time, or the custom date the games see.
+    void SetGameClockText(const QString& text);
+    void SetHiddenCount(int count);
+    void SetShowHidden(bool show);
+
+signals:
+    void GameClockClicked();
+    void ShowHiddenToggled(bool show);
+
 protected:
     bool eventFilter(QObject* object, QEvent* event) override;
 
@@ -30,6 +40,8 @@ private:
     void UpdateVisibility();
 
     QLabel* clock = nullptr;
+    QPushButton* game_clock_button = nullptr;
+    QPushButton* hidden_button = nullptr;
     QTimer* clock_timer = nullptr;
     QWidget* page = nullptr;
     QList<QWidget*> watched;

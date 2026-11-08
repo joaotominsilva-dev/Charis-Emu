@@ -171,6 +171,8 @@ struct Values {
     Setting<std::string> language{linkage, {}, "language", Category::Paths};
 
     std::string theme;
+    // Set once Charis Switch has applied its look to a config (also an imported PokeDinner one)
+    Setting<bool> charis_initialized{linkage, false, "charis_initialized", Category::Ui};
 
     // Shortcut name <Shortcut, context>
     std::vector<Shortcut> shortcuts;
@@ -203,17 +205,20 @@ struct Values {
 
     // Game List
     Setting<bool> show_add_ons{linkage, true, "show_add_ons", Category::UiGameList};
-    Setting<u32, true> game_icon_size{linkage, 64, 0, 512, "game_icon_size", Category::UiGameList};
+    Setting<u32, true> game_icon_size{linkage, 256, 0, 512, "game_icon_size", Category::UiGameList};
     Setting<u32, true> folder_icon_size{linkage, 48, 8, 512, "folder_icon_size", Category::UiGameList};
     Setting<u8> row_1_text_id{linkage, 3, "row_1_text_id", Category::UiGameList};
     Setting<u8> row_2_text_id{linkage, 2, "row_2_text_id", Category::UiGameList};
-    Setting<Settings::GameListMode> game_list_mode{linkage, Settings::GameListMode::TreeView, "game_list_mode", Category::UiGameList};
+    Setting<Settings::GameListMode> game_list_mode{linkage, Settings::GameListMode::GridView, "game_list_mode", Category::UiGameList};
     Setting<bool> show_game_name{linkage, true, "show_game_name", Category::UiGameList};
 
     std::atomic_bool is_game_list_reload_pending{false};
     Setting<bool> cache_game_list{linkage, true, "cache_game_list", Category::UiGameList};
     Setting<bool> favorites_expanded{linkage, true, "favorites_expanded", Category::UiGameList};
     QVector<u64> favorited_ids;
+    // Games hidden from the home screen, and whether they are shown anyway
+    QVector<u64> hidden_ids;
+    Setting<bool> show_hidden_games{linkage, false, "show_hidden_games", Category::UiGameList};
     QMap<u64, QDir> ryujinx_link_paths;
 
     // perf overlay
