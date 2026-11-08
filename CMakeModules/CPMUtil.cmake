@@ -178,6 +178,23 @@ endfunction()
 # And retry 5 times
 function(cpm_download url file)
     echo("Downloading ${url} to ${file}")
+
+    # Build hosts that can only reach GitHub over git: rebuild the source archive from the
+    # tagged commit instead (CPMUTIL_GIT_ARCHIVE_SCRIPT <repo> <ref> <output.tar.gz>).
+    if (DEFINED ENV{CPMUTIL_GIT_ARCHIVE_SCRIPT}
+        AND url MATCHES "^https://github\\.com/([^/]+/[^/]+)/archive/(.+)\\.tar\\.gz$")
+        set(git_repo "${CMAKE_MATCH_1}")
+        set(git_ref "${CMAKE_MATCH_2}")
+        execute_process(
+            COMMAND bash "$ENV{CPMUTIL_GIT_ARCHIVE_SCRIPT}" "${git_repo}" "${git_ref}" "${file}"
+            RESULT_VARIABLE git_result)
+        if (git_result EQUAL 0)
+            echo("Built ${file} from git (${git_repo}@${git_ref})")
+            return()
+        endif()
+        fatal("Fetching ${git_repo}@${git_ref} through git failed")
+    endif()
+
     list(LENGTH ARGN argn_len)
     if(argn_len GREATER 0)
         list(GET ARGN 0 hash)

@@ -37,14 +37,19 @@ if (NOT YUZU_USE_BUNDLED_FFMPEG)
         string(TOLOWER "${CMAKE_SYSTEM_NAME}" FFmpeg_SYSTEM_NAME)
         if (FFmpeg_SYSTEM_NAME STREQUAL "openorbis" OR FFmpeg_SYSTEM_NAME STREQUAL "managarm")
             set(FFmpeg_SYSTEM_NAME "none")
+        elseif (MINGW)
+            # FFmpeg names the MinGW-w64 target mingw64, not windows
+            set(FFmpeg_SYSTEM_NAME "mingw64")
         endif()
         # TODO: Can we really do better? Auto-detection? Something clever?
         list(APPEND FFmpeg_CROSS_COMPILE_FLAGS
             --enable-cross-compile
             --arch="${CMAKE_SYSTEM_PROCESSOR}"
             --target-os="${FFmpeg_SYSTEM_NAME}"
-            --sysroot="${CMAKE_SYSROOT}"
         )
+        if (CMAKE_SYSROOT)
+            list(APPEND FFmpeg_CROSS_COMPILE_FLAGS --sysroot="${CMAKE_SYSROOT}")
+        endif()
         if (DEFINED FFmpeg_CROSS_PREFIX)
             list(APPEND FFmpeg_CROSS_COMPILE_FLAGS --cross-prefix="${FFmpeg_CROSS_PREFIX}")
         else()
