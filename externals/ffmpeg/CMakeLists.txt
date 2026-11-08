@@ -50,6 +50,11 @@ if (NOT YUZU_USE_BUNDLED_FFMPEG)
         if (CMAKE_SYSROOT)
             list(APPEND FFmpeg_CROSS_COMPILE_FLAGS --sysroot="${CMAKE_SYSROOT}")
         endif()
+        if (MINGW)
+            # Only used for subtitle charset conversion, and the MinGW iconv signature
+            # does not match what FFmpeg expects with newer GCC
+            list(APPEND FFmpeg_CROSS_COMPILE_FLAGS --disable-iconv)
+        endif()
         if (DEFINED FFmpeg_CROSS_PREFIX)
             list(APPEND FFmpeg_CROSS_COMPILE_FLAGS --cross-prefix="${FFmpeg_CROSS_PREFIX}")
         else()
