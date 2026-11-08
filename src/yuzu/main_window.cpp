@@ -42,6 +42,9 @@
 #include "ryujinx_dialog.h"
 #include "set_play_time_dialog.h"
 #include "util/util.h"
+#include <QFontDatabase>
+#include <QVBoxLayout>
+#include "yuzu/charis_header.h"
 #include "yuzu/game/game_list.h"
 #include "yuzu/nup_dialogs.h"
 
@@ -939,13 +942,25 @@ void MainWindow::InitializeWidgets() {
     render_window = new GRenderWindow(this, input_subsystem);
     render_window->hide();
 
-    game_list = new GameList(QtCommon::vfs, QtCommon::provider.get(), *play_time_manager,
-                             *QtCommon::system, this);
-    ui->horizontalLayout->addWidget(game_list);
+    // Library page: Charis header on top of the game list (or its placeholder).
+    auto* library_page = new QWidget(this);
+    auto* library_layout = new QVBoxLayout(library_page);
+    library_layout->setContentsMargins(0, 0, 0, 0);
+    library_layout->setSpacing(0);
+    ui->horizontalLayout->addWidget(library_page);
 
-    game_list_placeholder = new GameListPlaceholder(this);
-    ui->horizontalLayout->addWidget(game_list_placeholder);
+    charis_header = new CharisHeader(library_page);
+    library_layout->addWidget(charis_header);
+
+    game_list = new GameList(QtCommon::vfs, QtCommon::provider.get(), *play_time_manager,
+                             *QtCommon::system, library_page);
+    library_layout->addWidget(game_list, 1);
+
+    game_list_placeholder = new GameListPlaceholder(library_page);
+    library_layout->addWidget(game_list_placeholder, 1);
     game_list_placeholder->setVisible(false);
+
+    charis_header->Track(library_page, {game_list, game_list_placeholder});
 
     loading_screen = new LoadingScreen(this);
     loading_screen->hide();
@@ -4398,7 +4413,7 @@ void MainWindow::OnApplicationChanged(u64 program_id) {
 void MainWindow::UpdateWindowTitle(std::string_view title_name, std::string_view title_version,
                                    std::string_view gpu_vendor) {
     static const std::string build_id = std::string{Common::g_build_id};
-    static const std::string yuzu_title = "Eglantine - PokeDinner fork by Franseven";
+    static const std::string yuzu_title = "Charis Switch (PokeDinner / Eglantine)";
 
     const auto override_title =
         fmt::format(fmt::runtime(std::string(Common::g_title_bar_format_idle)), build_id);
@@ -4991,6 +5006,19 @@ void MainWindow::UpdateUITheme() {
     if (current_theme.isEmpty())
         current_theme = default_theme;
 
+    const bool is_charis = current_theme == QStringLiteral("charis");
+    if (is_charis) {
+        static const bool fonts_loaded = [] {
+            for (const char* name : {"Regular", "SemiBold", "Bold", "ExtraBold"}) {
+                QFontDatabase::addApplicationFont(
+                    QStringLiteral(":charis/fonts/Archivo-%1.ttf").arg(QString::fromUtf8(name)));
+            }
+            return true;
+        }();
+        QFont font(QStringLiteral("Archivo"), 10);
+        qApp->setFont(font);
+    }
+
 #ifdef _WIN32
     QIcon::setThemeName(current_theme);
     AdjustLinkColor();
@@ -5033,8 +5061,12 @@ void MainWindow::UpdateUITheme() {
 
 #ifdef _WIN32
     RemoveTitlebarFilter();
-    ApplyGlobalDarkTitlebar(UISettings::IsDarkTheme());
+    ApplyGlobalDarkTitlebar(UISettings::IsDarkTheme() || is_charis);
 #endif
+
+    if (charis_header) {
+        charis_header->SetThemeActive(is_charis);
+    }
 }
 
 void MainWindow::LoadTranslation() {

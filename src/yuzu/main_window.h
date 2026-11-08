@@ -66,6 +66,7 @@ class ConfigurePostProcessing;
 enum class GameListOpenTarget;
 enum class DumpRomFSTarget;
 class GameListPlaceholder;
+class CharisHeader;
 
 class QtAmiiboSettingsDialog;
 class QtControllerSelectorDialog;
@@ -517,6 +518,7 @@ private:
 #endif
 
     GameListPlaceholder* game_list_placeholder = nullptr;
+    CharisHeader* charis_header = nullptr;
 
     std::vector<VkDeviceInfo::Record> vk_device_records;
 

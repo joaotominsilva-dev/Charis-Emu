@@ -216,6 +216,8 @@ add_executable(yuzu
 
     user_data_migration.h user_data_migration.cpp
 
+    charis_header.h charis_header.cpp
+
     yuzu.qrc
     yuzu.rc
     migration_dialog.h migration_dialog.cpp
