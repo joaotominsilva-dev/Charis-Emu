@@ -963,11 +963,12 @@ void MainWindow::InitializeWidgets() {
     charis_header = new CharisHeader(library_page);
     library_layout->addWidget(charis_header);
 
+    // Both take the main window in their constructor; the layout then moves them into the page.
     game_list = new GameList(QtCommon::vfs, QtCommon::provider.get(), *play_time_manager,
-                             *QtCommon::system, library_page);
+                             *QtCommon::system, this);
     library_layout->addWidget(game_list, 1);
 
-    game_list_placeholder = new GameListPlaceholder(library_page);
+    game_list_placeholder = new GameListPlaceholder(this);
     library_layout->addWidget(game_list_placeholder, 1);
     game_list_placeholder->setVisible(false);
 
