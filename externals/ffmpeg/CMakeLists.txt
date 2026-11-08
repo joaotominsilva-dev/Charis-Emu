@@ -261,8 +261,9 @@ else()
 
     # `configure` parameters builds only exactly what yuzu needs from FFmpeg
     # `--disable-vdpau` is needed to avoid linking issues
-    set(FFmpeg_CC ${CMAKE_C_COMPILER_LAUNCHER}  ${CMAKE_C_COMPILER})
-    set(FFmpeg_CXX ${CMAKE_CXX_COMPILER_LAUNCHER}  ${CMAKE_CXX_COMPILER})
+    # configure takes the launcher and compiler as one value ("ccache gcc")
+    string(JOIN " " FFmpeg_CC ${CMAKE_C_COMPILER_LAUNCHER} ${CMAKE_C_COMPILER})
+    string(JOIN " " FFmpeg_CXX ${CMAKE_CXX_COMPILER_LAUNCHER} ${CMAKE_CXX_COMPILER})
     add_custom_command(
         OUTPUT
             ${FFmpeg_MAKEFILE}
