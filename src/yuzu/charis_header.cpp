@@ -45,6 +45,7 @@ CharisHeader::CharisHeader(QWidget* parent) : QWidget(parent) {
     hidden_button->setObjectName(QStringLiteral("CharisPillButton"));
     hidden_button->setCheckable(true);
     hidden_button->setCursor(Qt::PointingHandCursor);
+    hidden_button->setFocusPolicy(Qt::NoFocus);
     hidden_button->setToolTip(QStringLiteral("Mostrar ou esconder os jogos que você ocultou"));
     connect(hidden_button, &QPushButton::toggled, this, [this](bool show) {
         SetHiddenCount(property("hidden_count").toInt());
@@ -56,6 +57,7 @@ CharisHeader::CharisHeader(QWidget* parent) : QWidget(parent) {
     game_clock_button = new QPushButton(body);
     game_clock_button->setObjectName(QStringLiteral("CharisPillButton"));
     game_clock_button->setCursor(Qt::PointingHandCursor);
+    game_clock_button->setFocusPolicy(Qt::NoFocus);
     game_clock_button->setToolTip(QStringLiteral("Mudar a data e a hora que os jogos veem"));
     connect(game_clock_button, &QPushButton::clicked, this, &CharisHeader::GameClockClicked);
     top_row->addWidget(game_clock_button);

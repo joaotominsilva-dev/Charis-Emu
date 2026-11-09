@@ -1362,3 +1362,7 @@ QDateTimeEdit::drop-down {
     border: none;
     width: 28px;
 }
+
+QStatusBar::item {
+    border: none;
+}
