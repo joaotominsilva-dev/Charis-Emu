@@ -504,12 +504,12 @@ if(NOT TARGET Boost::headers)
     AddJsonPackage(boost_headers)
 endif()
 
-# List of all FFmpeg components required
+# List of all FFmpeg components required, in static link order (users before what they use)
 set(FFmpeg_COMPONENTS
-    avcodec
     avfilter
-    avutil
-    swscale)
+    avcodec
+    swscale
+    avutil)
 
 # This function should be passed a list of all files in a target. It will automatically generate
 # file groups following the directory hierarchy, so that the layout of the files in IDEs matches the
