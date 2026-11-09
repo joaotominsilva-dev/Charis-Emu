@@ -163,7 +163,15 @@ QString CharisCovers::MarkerPath(u64 program_id, const char* kind) const {
 }
 
 bool CharisCovers::HasCover(u64 program_id) const {
-    return program_id != 0 && QFileInfo::exists(PathFor(program_id));
+    if (program_id == 0) {
+        return false;
+    }
+    if (const auto it = has_cover.constFind(program_id); it != has_cover.cend()) {
+        return *it;
+    }
+    const bool exists = QFileInfo::exists(PathFor(program_id));
+    has_cover.insert(program_id, exists);
+    return exists;
 }
 
 QPixmap CharisCovers::Cover(u64 program_id, const QSize& size) {
@@ -206,26 +214,17 @@ QPixmap CharisCovers::IconCover(const QPixmap& icon, const QSize& size) {
     if (const auto it = scaled.constFind(key); it != scaled.cend()) {
         return *it;
     }
-    QPixmap out(size);
-    out.fill(QColor(0x20, 0x21, 0x1C));
-    QPainter painter(&out);
-    painter.setRenderHint(QPainter::SmoothPixmapTransform);
-    // Shrinking to a few pixels and back gives a soft blur of the icon's colors
-    const QPixmap tiny = icon.scaled(QSize(8, 8), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
-    const QPixmap blurred = tiny.scaled(size, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
-    painter.drawPixmap((size.width() - blurred.width()) / 2, (size.height() - blurred.height()) / 2,
-                       blurred);
-    painter.fillRect(out.rect(), QColor(0x20, 0x21, 0x1C, 70));
-    const int side = std::min(size.width(), size.height());
-    const QPixmap fit = icon.scaled(QSize(side, side), Qt::KeepAspectRatio, Qt::SmoothTransformation);
-    painter.drawPixmap((size.width() - fit.width()) / 2, (size.height() - fit.height()) / 2, fit);
-    painter.end();
+    const QPixmap filled = icon.scaled(size, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
+    const QPixmap out = filled.copy((filled.width() - size.width()) / 2,
+                                    (filled.height() - size.height()) / 2, size.width(),
+                                    size.height());
     scaled.insert(key, out);
     return out;
 }
 
 void CharisCovers::ClearCache(u64 program_id) {
     originals.remove(program_id);
+    has_cover.remove(program_id);
     const QString prefix = QStringLiteral("%1:").arg(program_id);
     for (auto it = scaled.begin(); it != scaled.end();) {
         it = it.key().startsWith(prefix) ? scaled.erase(it) : std::next(it);

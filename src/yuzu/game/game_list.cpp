@@ -94,8 +94,10 @@ GameList::GameList(FileSys::VirtualFilesystem vfs_, FileSys::ManualContentProvid
 
     connect(item_model, &GameListModel::PopulatingCompleted, this,
             &GameList::OnPopulatingCompleted);
-    connect(&CharisCovers::Instance(), &CharisCovers::CoverChanged, this,
-            [this](u64) { m_currentView->viewport()->update(); });
+    connect(&CharisCovers::Instance(), &CharisCovers::CoverChanged, this, [this](u64) {
+        grid_view->UpdateIconSize();
+        m_currentView->viewport()->update();
+    });
 
     connect(item_model, &GameListModel::ShowList, this, &GameList::ShowList);
     connect(item_model, &GameListModel::SaveConfig, this, &GameList::SaveConfig);

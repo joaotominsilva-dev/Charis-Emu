@@ -8,6 +8,7 @@
 #include "qt_common/game_list/model.h"
 #include "yuzu/game/common.h"
 #include "yuzu/game/game_card.h"
+#include "yuzu/charis_covers.h"
 #include "yuzu/game/game_grid.h"
 
 GameGrid::GameGrid(QWidget* parent) : QListView{parent} {
@@ -67,7 +68,16 @@ void GameGrid::UpdateIconSize() {
         // GameCard draws the card min_item_width - 8 wide with 12 px padding; the cover is 2:3,
         // with 66 px for the name and play time below it.
         const int painted_cover_w = min_item_width - 8 - 24;
-        const QSize grid_size(cell_width, painted_cover_w * 3 / 2 + 12 + 66 + 8 + 9);
+        bool any_box_art = false;
+        if (const auto* list_model = model()) {
+            for (int i = 0; i < list_model->rowCount() && !any_box_art; ++i) {
+                const u64 program_id =
+                    list_model->index(i, 0).data(GameListItemPath::ProgramIdRole).toULongLong();
+                any_box_art = CharisCovers::Instance().HasCover(program_id);
+            }
+        }
+        const int cover_h = any_box_art ? painted_cover_w * 3 / 2 : painted_cover_w;
+        const QSize grid_size(cell_width, cover_h + 12 + 66 + 8 + 9);
         if (gridSize() != grid_size) {
             setUpdatesEnabled(false);
             setGridSize(grid_size);

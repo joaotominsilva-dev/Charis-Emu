@@ -184,18 +184,20 @@ void GameCard::PaintCharis(QPainter* painter, const QStyleOptionViewItem& option
     painter->setBrush(card);
     painter->drawRoundedRect(card_rect, 20, 20);
 
-    // Cover area: 2:3 portrait, as wide as the card allows
+    // Cover area as wide as the card: 2:3 for box art, square for the game icon
+    auto& covers = CharisCovers::Instance();
+    const bool has_box_art = covers.HasCover(program_id);
     const int pad = 12;
     const int cover_w = card_rect.width() - pad * 2;
-    const int cover_h = std::min(cover_w * 3 / 2, card_rect.height() - pad - 66);
+    const int cover_h =
+        std::min(has_box_art ? cover_w * 3 / 2 : cover_w, card_rect.height() - pad - 66);
     const QRect cover_rect(card_rect.left() + pad, card_rect.top() + pad, cover_w, cover_h);
 
     QPainterPath clip;
     clip.addRoundedRect(cover_rect, 14, 14);
     painter->save();
     painter->setClipPath(clip);
-    auto& covers = CharisCovers::Instance();
-    QPixmap cover = covers.Cover(program_id, cover_rect.size());
+    QPixmap cover = has_box_art ? covers.Cover(program_id, cover_rect.size()) : QPixmap();
     if (cover.isNull()) {
         cover = covers.IconCover(index.data(Qt::DecorationRole).value<QPixmap>(),
                                  cover_rect.size());

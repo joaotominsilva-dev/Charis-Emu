@@ -28,8 +28,8 @@ public:
     QPixmap Cover(u64 program_id, const QSize& size);
     bool HasCover(u64 program_id) const;
 
-    // For games without box art: the square game icon across the full width, over a blurred
-    // copy of itself filling the rest of the box.
+    // For games without box art: the game icon filling the box (cropped from the center if the
+    // box is not square), scaled once and kept.
     QPixmap IconCover(const QPixmap& icon, const QSize& size);
 
     // Asks for a cover; when automatic covers are on and none is stored, it gets looked up.
@@ -64,5 +64,6 @@ private:
     QSet<u64> pending;
     bool fetching = false;
     QHash<u64, QPixmap> originals;
+    mutable QHash<u64, bool> has_cover;
     QHash<QString, QPixmap> scaled;
 };
