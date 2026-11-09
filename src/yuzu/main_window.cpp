@@ -43,8 +43,13 @@
 #include "set_play_time_dialog.h"
 #include "util/util.h"
 #include <QFontDatabase>
+#include <QTimer>
 #include <QVBoxLayout>
+#include "yuzu/charis_continue.h"
+#include "yuzu/charis_covers.h"
 #include "yuzu/charis_header.h"
+#include "yuzu/charis_updater.h"
+#include "input_common/drivers/sdl_merge.h"
 #include "yuzu/game_clock_dialog.h"
 #include "yuzu/game/game_list.h"
 #include "yuzu/nup_dialogs.h"
@@ -409,6 +414,20 @@ MainWindow::MainWindow(bool has_broken_vulkan)
 
     UISettings::RestoreWindowState(config);
 
+    // Charis defaults, applied once per step even on a config that came from elsewhere (for
+    // example the PokeDinner folder the installer imported).
+    if (!UISettings::values.charis_initialized.GetValue()) {
+        UISettings::values.theme = "charis";
+        UISettings::values.game_list_mode = Settings::GameListMode::GridView;
+        UISettings::values.game_icon_size = 256;
+        UISettings::values.charis_initialized = true;
+    }
+    if (UISettings::values.charis_config_version.GetValue() < 2) {
+        UISettings::values.language = std::string("pt_BR");
+        UISettings::values.fullscreen = true;
+        UISettings::values.charis_config_version = 2;
+    }
+
     LoadTranslation();
     FrontendCommon::GenerateSettings();
 
@@ -422,15 +441,6 @@ MainWindow::MainWindow(bool has_broken_vulkan)
     QIcon::setFallbackSearchPaths(QStringList(QStringLiteral(":/icons")));
 
     default_theme_paths = QIcon::themeSearchPaths();
-
-    // First start of Charis Switch on a config that came from elsewhere (for example the
-    // PokeDinner folder the installer imported): switch it to the Charis look once.
-    if (!UISettings::values.charis_initialized.GetValue()) {
-        UISettings::values.theme = "charis";
-        UISettings::values.game_list_mode = Settings::GameListMode::GridView;
-        UISettings::values.game_icon_size = 256;
-        UISettings::values.charis_initialized = true;
-    }
 
     UpdateUITheme();
 
@@ -963,6 +973,15 @@ void MainWindow::InitializeWidgets() {
     charis_header = new CharisHeader(library_page);
     library_layout->addWidget(charis_header);
 
+    continue_area = new QWidget(library_page);
+    auto* continue_layout = new QVBoxLayout(continue_area);
+    continue_layout->setContentsMargins(24, 4, 24, 8);
+    continue_card = new CharisContinueCard(continue_area);
+    continue_layout->addWidget(continue_card);
+    continue_area->setVisible(false);
+    library_layout->addWidget(continue_area);
+    connect(continue_card, &CharisContinueCard::PlayClicked, this, &MainWindow::OnContinuePlaying);
+
     // Both take the main window in their constructor; the layout then moves them into the page.
     game_list = new GameList(QtCommon::vfs, QtCommon::provider.get(), *play_time_manager,
                              *QtCommon::system, this);
@@ -984,10 +1003,68 @@ void MainWindow::InitializeWidgets() {
             &MainWindow::OnOpenGameClock);
     UpdateGameClockLabel();
 
+    connect(game_list, &GameList::ContinueRequested, this, &MainWindow::OnContinuePlaying);
+    connect(game_list, &GameList::PopulatingCompleted, this, &MainWindow::UpdateContinueCard);
+    connect(game_list, &GameList::ShowList, this, [this](bool) { UpdateContinueCard(); });
+    connect(&CharisCovers::Instance(), &CharisCovers::CoverChanged, this,
+            [this](u64) { UpdateContinueCard(); });
+
     auto* game_clock_action = new QAction(QStringLiteral("Data e hora do jogo..."), this);
     connect(game_clock_action, &QAction::triggered, this, &MainWindow::OnOpenGameClock);
     ui->menu_Emulation->addSeparator();
     ui->menu_Emulation->addAction(game_clock_action);
+
+    auto* smooth_action = new QAction(QStringLiteral("Ativar modo fluido"), this);
+    connect(smooth_action, &QAction::triggered, this, [this] {
+        if (emulation_running) {
+            QMessageBox::information(this, QStringLiteral("Modo fluido"),
+                                     QStringLiteral("Feche o jogo antes de ativar o modo fluido."));
+            return;
+        }
+        // The general part of the tuned Mario Kart World preset: less stutter while shaders
+        // build and steadier frame pacing, without touching resolution or accuracy.
+        Settings::values.use_asynchronous_shaders.SetValue(true);
+        Settings::values.use_disk_shader_cache.SetValue(true);
+        Settings::values.use_vulkan_driver_pipeline_cache.SetValue(true);
+        Settings::values.use_reactive_flushing.SetValue(false);
+        Settings::values.async_presentation.SetValue(true);
+        Settings::values.vsync_mode.SetValue(Settings::VSyncMode::FifoRelaxed);
+        config->SaveAllValues();
+        QMessageBox::information(
+            this, QStringLiteral("Modo fluido"),
+            QStringLiteral("Pronto. Liguei os shaders assíncronos, o cache de shaders em disco e do "
+                           "driver, a apresentação assíncrona, o VSync FIFO Relaxed e desliguei o "
+                           "reactive flushing.\n\nAs primeiras vezes de cada jogo ainda podem "
+                           "engasgar enquanto o cache é montado; depois fica mais liso. Se algum "
+                           "jogo ficar com gráficos errados, desligue os shaders assíncronos nas "
+                           "configurações desse jogo."));
+    });
+    ui->menu_Emulation->addAction(smooth_action);
+
+    auto* merge_action =
+        new QAction(QStringLiteral("Juntar controles em um só (Moonlight)"), this);
+    merge_action->setCheckable(true);
+    merge_action->setChecked(UISettings::values.charis_merge_gamepads.GetValue());
+    merge_action->setShortcut(QKeySequence(QStringLiteral("Ctrl+J")));
+    merge_action->setShortcutContext(Qt::ApplicationShortcut);
+    InputCommon::SetMergeGamepads(UISettings::values.charis_merge_gamepads.GetValue());
+    connect(merge_action, &QAction::toggled, this, [this](bool on) {
+        UISettings::values.charis_merge_gamepads = on;
+        InputCommon::SetMergeGamepads(on);
+        config->SaveAllValues();
+    });
+    ui->menu_Emulation->addAction(merge_action);
+    addAction(merge_action);
+
+    auto* update_action = new QAction(QStringLiteral("Atualizações do Charis Switch..."), this);
+    connect(update_action, &QAction::triggered, this, &MainWindow::OnOpenUpdates);
+    ui->menu_Help->insertAction(ui->menu_Help->actions().value(0), update_action);
+    connect(charis_header, &CharisHeader::UpdateClicked, this, &MainWindow::OnOpenUpdates);
+    connect(&CharisUpdater::Instance(), &CharisUpdater::UpdateFound, charis_header,
+            &CharisHeader::SetUpdateAvailable);
+    if (!UISettings::values.charis_update_folder.GetValue().empty()) {
+        QTimer::singleShot(8000, this, [] { CharisUpdater::Instance().Check(); });
+    }
 
     loading_screen = new LoadingScreen(this);
     loading_screen->hide();
@@ -2447,6 +2524,8 @@ void MainWindow::UpdateRecentFiles() {
 
     // Enable the recent files menu if the list isn't empty
     ui->menu_recent_files->setEnabled(num_recent_files != 0);
+
+    UpdateContinueCard();
 }
 
 void MainWindow::OnGameListLoadFile(QString game_path, u64 program_id) {
@@ -3368,7 +3447,7 @@ void MainWindow::OnMenuReportCompatibility() {
     //         !Settings::values.eden_username.GetValue().empty()) {
     //     } else {
     //         QMessageBox::critical(
-    //             this, tr("Missing yuzu Account"),
+    //             this, tr("Missing Charis Switch Account"),
     //             tr("In order to submit a game compatibility test case, you must set up your web
     //             token "
     //                "and "
@@ -4440,7 +4519,7 @@ void MainWindow::OnApplicationChanged(u64 program_id) {
 void MainWindow::UpdateWindowTitle(std::string_view title_name, std::string_view title_version,
                                    std::string_view gpu_vendor) {
     static const std::string build_id = std::string{Common::g_build_id};
-    static const std::string yuzu_title = "Charis Switch (PokeDinner / Eglantine)";
+    static const std::string yuzu_title = "Charis Switch";
 
     const auto override_title =
         fmt::format(fmt::runtime(std::string(Common::g_title_bar_format_idle)), build_id);
@@ -4760,7 +4839,7 @@ void MainWindow::OnCheckGraphicsBackend() {
         UISettings::values.gui_force_x11.SetValue(true);
         GraphicsBackend::SetForceX11(true);
         QMessageBox::information(this, tr("Restart Required"),
-                                 tr("Restart Eglantine to apply the X11 backend."));
+                                 tr("Restart Charis Switch to apply the X11 backend."));
     }
 }
 #endif
@@ -4879,8 +4958,8 @@ bool MainWindow::ConfirmClose() {
         UISettings::values.confirm_before_stopping.GetValue() == ConfirmStop::Ask_Based_On_Game)
         return true;
 
-    const auto text = tr("Are you sure you want to close Eglantine?");
-    return question(this, tr("Eglantine"), text);
+    const auto text = tr("Are you sure you want to close Charis Switch?");
+    return question(this, tr("Charis Switch"), text);
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
@@ -4986,7 +5065,7 @@ bool MainWindow::ConfirmChangeGame() {
 
     // Use custom question to link controller navigation
     return question(
-        this, tr("Eglantine"),
+        this, tr("Charis Switch"),
         tr("Are you sure you want to stop the emulation? Any unsaved progress will be lost."),
         QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
 }
@@ -4995,10 +5074,10 @@ bool MainWindow::ConfirmForceLockedExit() {
     if (QtCommon::emu_thread == nullptr)
         return true;
 
-    const auto text = tr("The currently running application has requested Eglantine to not exit.\n\n"
+    const auto text = tr("The currently running application has requested Charis Switch to not exit.\n\n"
                          "Would you like to bypass this and exit anyway?");
 
-    return question(this, tr("Eglantine"), text);
+    return question(this, tr("Charis Switch"), text);
 }
 
 void MainWindow::RequestGameExit() {
@@ -5112,6 +5191,47 @@ void MainWindow::OnOpenGameClock() {
     UpdateGameClockLabel();
 }
 
+void MainWindow::UpdateContinueCard() {
+    if (!continue_card) {
+        return;
+    }
+    continue_path.clear();
+    const bool charis = UISettings::values.theme == std::string("charis");
+    GameList::GameInfo info;
+    if (charis) {
+        for (const QString& path : UISettings::values.recent_files) {
+            if (game_list->FindGame(path, info)) {
+                continue_path = path;
+                break;
+            }
+        }
+    }
+    if (continue_path.isEmpty()) {
+        continue_area->setVisible(false);
+        return;
+    }
+    continue_card->SetGame(info.title, info.program_id, info.icon, info.play_seconds);
+    continue_area->setVisible(!game_list->isHidden());
+}
+
+void MainWindow::OnOpenUpdates() {
+    CharisUpdateDialog dialog(emulation_running, this);
+    bool installing = false;
+    connect(&dialog, &CharisUpdateDialog::InstallStarted, this, [&installing] { installing = true; });
+    dialog.exec();
+    config->SaveAllValues();
+    if (installing) {
+        // The installer waits for this window to close, then reopens the new version.
+        close();
+    }
+}
+
+void MainWindow::OnContinuePlaying() {
+    if (!continue_path.isEmpty() && !emulation_running) {
+        BootGameFromList(continue_path, StartGameType::Normal);
+    }
+}
+
 void MainWindow::UpdateGameClockLabel() {
     if (charis_header) {
         charis_header->SetGameClockText(
@@ -5136,6 +5256,16 @@ void MainWindow::LoadTranslation() {
         qApp->installTranslator(&translator);
     else
         UISettings::values.language = std::string("en");
+
+    // Qt's own texts (OK, Cancel, Yes, No...) come from the qtbase catalog shipped next to the exe
+    static QTranslator qt_base_translator;
+    const QString language = QString::fromStdString(UISettings::values.language.GetValue());
+    if (!language.isEmpty() && language != QStringLiteral("en") &&
+        qt_base_translator.load(QStringLiteral("qtbase_") + language,
+                                QCoreApplication::applicationDirPath() +
+                                    QStringLiteral("/translations"))) {
+        qApp->installTranslator(&qt_base_translator);
+    }
 }
 
 void MainWindow::OnLanguageChanged(const QString& locale) {

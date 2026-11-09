@@ -4,7 +4,7 @@
 ; Charis Switch installer. Installs per user (no admin) and can bring over the settings, saves,
 ; keys and firmware of an existing PokeDinner / Eglantine / Eden folder on this PC.
 ;
-;   makensis -DPRODUCT_VERSION=1.0.0 -DBINARY_SOURCE_DIR=<folder with eglantine.exe> installer.nsi
+;   makensis -DPRODUCT_VERSION=1.1.0 -DBINARY_SOURCE_DIR=<folder with CharisSwitch.exe> installer.nsi
 
 !ifndef PRODUCT_VERSION
   !error "PRODUCT_VERSION must be defined"
@@ -19,7 +19,7 @@ ManifestDPIAware true
 RequestExecutionLevel user
 
 !define PRODUCT_NAME "Charis Switch"
-!define PRODUCT_EXE "eglantine.exe"
+!define PRODUCT_EXE "CharisSwitch.exe"
 !define PRODUCT_PUBLISHER "Charis"
 !define PRODUCT_UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}"
 
@@ -175,6 +175,24 @@ FunctionEnd
 Section "Charis Switch" SecMain
   SectionIn RO
   SetOutPath "$INSTDIR"
+
+  ; An update started from inside the program: wait until it has closed and its exe can be
+  ; replaced (up to about 30 seconds).
+  StrCpy $R8 0
+  ${Do}
+    ${IfNot} ${FileExists} "$INSTDIR\${PRODUCT_EXE}"
+      ${Break}
+    ${EndIf}
+    ClearErrors
+    FileOpen $R9 "$INSTDIR\${PRODUCT_EXE}" a
+    ${IfNot} ${Errors}
+      FileClose $R9
+      ${Break}
+    ${EndIf}
+    Sleep 500
+    IntOp $R8 $R8 + 1
+  ${LoopUntil} $R8 >= 60
+  Delete "$INSTDIR\eglantine.exe"
   File /r "${BINARY_SOURCE_DIR}\*"
   File "charis.ico"
 
@@ -201,6 +219,14 @@ SectionEnd
 
 Section -Post
   WriteUninstaller "$INSTDIR\desinstalar.exe"
+
+  ; Reopen the program after an update started from inside it
+  ${GetParameters} $R0
+  ClearErrors
+  ${GetOptions} $R0 "/RELAUNCH" $R1
+  ${IfNot} ${Errors}
+    Exec '"$INSTDIR\${PRODUCT_EXE}"'
+  ${EndIf}
   WriteRegStr HKCU "${PRODUCT_UNINST_KEY}" "DisplayName" "${PRODUCT_NAME}"
   WriteRegStr HKCU "${PRODUCT_UNINST_KEY}" "DisplayVersion" "${PRODUCT_VERSION}"
   WriteRegStr HKCU "${PRODUCT_UNINST_KEY}" "UninstallString" "$INSTDIR\desinstalar.exe"

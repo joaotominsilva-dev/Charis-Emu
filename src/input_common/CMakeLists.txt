@@ -11,6 +11,8 @@ add_library(input_common STATIC
     drivers/keyboard.h
     drivers/mouse.cpp
     drivers/mouse.h
+    drivers/sdl_merge.cpp
+    drivers/sdl_merge.h
     drivers/tas_input.cpp
     drivers/tas_input.h
     drivers/touch_screen.cpp

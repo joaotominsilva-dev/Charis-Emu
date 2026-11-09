@@ -3,6 +3,7 @@
 // SPDX-FileCopyrightText: 2018 Citra Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
 #include <array>
 #include <numbers>
 #include "common/logging.h"
@@ -12,6 +13,7 @@
 #include "common/thread.h"
 #include "common/vector_math.h"
 #include "input_common/drivers/sdl_driver.h"
+#include "input_common/drivers/sdl_merge.h"
 
 namespace InputCommon {
 
@@ -573,32 +575,58 @@ void SDLDriver::PumpEvents() const {
     }
 }
 
+PadIdentifier SDLDriver::RoutedIdentifier(const std::shared_ptr<SDLJoystick>& joystick) {
+    if (!GetMergeGamepads()) {
+        return joystick->GetPadIdentifier();
+    }
+    // The open pad with the lowest SDL instance id is the one player 1 is mapped to.
+    std::shared_ptr<SDLJoystick> primary = joystick;
+    SDL_JoystickID best = joystick->GetSDLJoystick() != nullptr
+                              ? SDL_GetJoystickID(joystick->GetSDLJoystick())
+                              : 0;
+    std::scoped_lock lock{joystick_map_mutex};
+    for (const auto& [guid, list] : joystick_map) {
+        for (const auto& candidate : list) {
+            SDL_Joystick* sdl = candidate->GetSDLJoystick();
+            if (sdl == nullptr) {
+                continue;
+            }
+            const SDL_JoystickID id = SDL_GetJoystickID(sdl);
+            if (best == 0 || id < best) {
+                best = id;
+                primary = candidate;
+            }
+        }
+    }
+    return primary->GetPadIdentifier();
+}
+
 void SDLDriver::HandleGameControllerEvent(const SDL_Event& event) {
     switch (event.type) {
     case SDL_EVENT_JOYSTICK_BUTTON_UP: {
         if (const auto joystick = GetSDLJoystickBySDLID(event.jbutton.which)) {
-            const PadIdentifier identifier = joystick->GetPadIdentifier();
+            const PadIdentifier identifier = RoutedIdentifier(joystick);
             SetButton(identifier, event.jbutton.button, false);
         }
         break;
     }
     case SDL_EVENT_JOYSTICK_BUTTON_DOWN: {
         if (const auto joystick = GetSDLJoystickBySDLID(event.jbutton.which)) {
-            const PadIdentifier identifier = joystick->GetPadIdentifier();
+            const PadIdentifier identifier = RoutedIdentifier(joystick);
             SetButton(identifier, event.jbutton.button, true);
         }
         break;
     }
     case SDL_EVENT_JOYSTICK_HAT_MOTION: {
         if (const auto joystick = GetSDLJoystickBySDLID(event.jhat.which)) {
-            const PadIdentifier identifier = joystick->GetPadIdentifier();
+            const PadIdentifier identifier = RoutedIdentifier(joystick);
             SetHatButton(identifier, event.jhat.hat, event.jhat.value);
         }
         break;
     }
     case SDL_EVENT_JOYSTICK_AXIS_MOTION: {
         if (const auto joystick = GetSDLJoystickBySDLID(event.jaxis.which)) {
-            const PadIdentifier identifier = joystick->GetPadIdentifier();
+            const PadIdentifier identifier = RoutedIdentifier(joystick);
             SetAxis(identifier, event.jaxis.axis, event.jaxis.value / 32767.0f);
         }
         break;

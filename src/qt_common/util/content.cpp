@@ -498,7 +498,7 @@ bool CheckKeys() {
     if (!ContentManager::AreKeysPresent()) {
         QtCommon::Frontend::Information(
             tr("Keys not installed"),
-            tr("Install decryption keys and restart Eden before attempting to install firmware."));
+            tr("Install decryption keys and restart Charis Switch before attempting to install firmware."));
         return false;
     }
 

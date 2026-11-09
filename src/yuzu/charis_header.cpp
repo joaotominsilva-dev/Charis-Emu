@@ -41,6 +41,14 @@ CharisHeader::CharisHeader(QWidget* parent) : QWidget(parent) {
     top_row->addWidget(brand);
     top_row->addStretch(1);
 
+    update_button = new QPushButton(body);
+    update_button->setObjectName(QStringLiteral("CharisUpdateButton"));
+    update_button->setCursor(Qt::PointingHandCursor);
+    update_button->setFocusPolicy(Qt::NoFocus);
+    update_button->setVisible(false);
+    connect(update_button, &QPushButton::clicked, this, &CharisHeader::UpdateClicked);
+    top_row->addWidget(update_button);
+
     hidden_button = new QPushButton(body);
     hidden_button->setObjectName(QStringLiteral("CharisPillButton"));
     hidden_button->setCheckable(true);
@@ -125,6 +133,11 @@ void CharisHeader::SetHiddenCount(int count) {
         hidden_button->setText(QStringLiteral("Ver ocultos (%1)").arg(count));
     }
     hidden_button->setEnabled(count > 0 || hidden_button->isChecked());
+}
+
+void CharisHeader::SetUpdateAvailable(const QString& version) {
+    update_button->setText(QStringLiteral("Atualiza\u00E7\u00E3o %1 dispon\u00EDvel").arg(version));
+    update_button->setVisible(!version.isEmpty());
 }
 
 void CharisHeader::SetShowHidden(bool show) {

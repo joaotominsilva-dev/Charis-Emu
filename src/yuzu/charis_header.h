@@ -27,9 +27,11 @@ public:
     void SetGameClockText(const QString& text);
     void SetHiddenCount(int count);
     void SetShowHidden(bool show);
+    void SetUpdateAvailable(const QString& version);
 
 signals:
     void GameClockClicked();
+    void UpdateClicked();
     void ShowHiddenToggled(bool show);
 
 protected:
@@ -42,6 +44,7 @@ private:
     QLabel* clock = nullptr;
     QPushButton* game_clock_button = nullptr;
     QPushButton* hidden_button = nullptr;
+    QPushButton* update_button = nullptr;
     QTimer* clock_timer = nullptr;
     QWidget* page = nullptr;
     QList<QWidget*> watched;

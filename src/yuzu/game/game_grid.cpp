@@ -57,6 +57,26 @@ void GameGrid::ApplyFilter(const QString& edit_filter_text, GameListModel* model
 void GameGrid::UpdateIconSize() {
     const u32 icon_size = UISettings::values.game_icon_size.GetValue();
 
+    if (UISettings::values.theme == std::string("charis")) {
+        // Portrait cover cards: the icon size setting picks the cover width.
+        const int cover_w = std::max(120, static_cast<int>(icon_size == 0 ? 256 : icon_size) * 2 / 3);
+        const int min_item_width = cover_w + 24 + 24;
+        const int view_width = viewport()->width();
+        const int columns = std::max(1, (view_width - 16) / min_item_width);
+        const int cell_width = view_width / columns;
+        // GameCard draws the card min_item_width - 8 wide with 12 px padding; the cover is 2:3,
+        // with 66 px for the name and play time below it.
+        const int painted_cover_w = min_item_width - 8 - 24;
+        const QSize grid_size(cell_width, painted_cover_w * 3 / 2 + 12 + 66 + 8 + 9);
+        if (gridSize() != grid_size) {
+            setUpdatesEnabled(false);
+            setGridSize(grid_size);
+            m_gameCard->setSize(grid_size, grid_size, cell_width - min_item_width, columns);
+            setUpdatesEnabled(true);
+        }
+        return;
+    }
+
     int heightMargin = 0;
     int widthMargin = 80;
 

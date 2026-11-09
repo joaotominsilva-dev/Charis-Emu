@@ -173,6 +173,13 @@ struct Values {
     std::string theme;
     // Set once Charis Switch has applied its look to a config (also an imported PokeDinner one)
     Setting<bool> charis_initialized{linkage, false, "charis_initialized", Category::Ui};
+    Setting<u32> charis_config_version{linkage, 0, "charis_config_version", Category::Ui};
+    // Charis: download box art for the home screen, and the shared Google Drive folder that
+    // holds Charis Switch installers for the in-app updater
+    Setting<bool> charis_auto_covers{linkage, true, "charis_auto_covers", Category::Ui};
+    Setting<std::string> charis_update_folder{linkage, {}, "charis_update_folder", Category::Ui};
+    // Joins every connected controller into player 1 (Moonlight can split a Joy-Con pair)
+    Setting<bool> charis_merge_gamepads{linkage, false, "charis_merge_gamepads", Category::Ui};
 
     // Shortcut name <Shortcut, context>
     std::vector<Shortcut> shortcuts;

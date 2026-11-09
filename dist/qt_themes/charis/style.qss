@@ -775,10 +775,6 @@ QDialog#QtSoftwareKeyboardDialog QPushButton#button_space_shift:disabled {
 * ink #1D1E19  ink-soft #55564B  on-dark-soft #A9AA98  danger #953521
 */
 
-* {
-    font-family: "Archivo";
-}
-
 QMainWindow, QDialog, QWizard, QMessageBox, QWidget#centralwidget {
     background-color: #F3F4EA;
     color: #1D1E19;
@@ -1365,4 +1361,89 @@ QDateTimeEdit::drop-down {
 
 QStatusBar::item {
     border: none;
+}
+
+QFrame#CharisContinue {
+    background-color: #E9EADD;
+    border-radius: 20px;
+}
+
+QLabel#ContinueEyebrow {
+    color: #55564B;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 2px;
+}
+
+QLabel#ContinueTitle {
+    color: #1D1E19;
+    font-size: 20px;
+    font-weight: 800;
+}
+
+QLabel#ContinueDetail {
+    color: #55564B;
+    font-size: 13px;
+}
+
+QPushButton#ContinuePlay {
+    background-color: #20211C;
+    color: #F3F4EA;
+    border-radius: 14px;
+    padding: 12px 26px;
+    font-size: 15px;
+    font-weight: 700;
+}
+
+QPushButton#ContinuePlay:hover {
+    background-color: #2C2D27;
+}
+
+QPushButton#CharisUpdateButton {
+    background-color: #F3F4EA;
+    color: #1D1E19;
+    border-radius: 12px;
+    padding: 6px 14px;
+    font-size: 13px;
+    font-weight: 700;
+}
+
+QPushButton#CharisUpdateButton:hover {
+    background-color: #FFFFFF;
+}
+
+QDialog#CharisUpdateDialog QLabel#DialogEyebrow {
+    color: #55564B;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 2px;
+}
+
+QDialog#CharisUpdateDialog QLabel#DialogTitle {
+    color: #1D1E19;
+    font-size: 26px;
+    font-weight: 800;
+}
+
+QDialog#CharisUpdateDialog QLabel#DialogText {
+    color: #55564B;
+    font-size: 14px;
+}
+
+QDialog#CharisUpdateDialog QLabel#DialogPreview {
+    background-color: #20211C;
+    color: #F3F4EA;
+    border-radius: 16px;
+    padding: 14px 18px;
+    font-size: 14px;
+    font-weight: 700;
+}
+
+QDialog#CharisUpdateDialog QLabel#DialogPreview[error="true"] {
+    background-color: #953521;
+}
+
+QDialog#CharisUpdateDialog QPushButton#SecondaryButton {
+    background-color: #E9EADD;
+    color: #1D1E19;
 }

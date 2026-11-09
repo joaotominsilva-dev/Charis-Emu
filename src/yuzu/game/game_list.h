@@ -6,8 +6,11 @@
 
 #pragma once
 
+#include <functional>
+
 #include <QLabel>
 #include <QLineEdit>
+#include <QPixmap>
 #include <QList>
 #include <QPushButton>
 #include <QStandardItemModel>
@@ -92,6 +95,16 @@ public:
     void RefreshFilter();
     void SetShowHiddenGames(bool show);
 
+    struct GameInfo {
+        QString title;
+        QString path;
+        u64 program_id = 0;
+        QPixmap icon;
+        qulonglong play_seconds = 0;
+    };
+    /// Looks a game up by its file path; returns false when it is not in the list
+    bool FindGame(const QString& path, GameInfo& out) const;
+
 public slots:
     void SetNupConversionRunning(bool running);
     void RefreshGameDirectory();
@@ -124,6 +137,8 @@ signals:
     void PopulatingCompleted();
     void SaveConfig();
     void HiddenGamesChanged(int hidden_count);
+    /// The controller's X button on the home screen: open the last played game
+    void ContinueRequested();
 
 private slots:
     void OnTextChanged(const QString& new_text);
@@ -140,6 +155,8 @@ private:
 
     void ToggleFavorite(u64 program_id);
     void ToggleHidden(u64 program_id);
+    void ForEachGame(const std::function<void(QStandardItem*)>& callback) const;
+    void RequestCovers();
 
     void PopupContextMenu(const QPoint& menu_location);
     void AddGamePopup(QMenu& context_menu, u64 program_id, const std::string& path);

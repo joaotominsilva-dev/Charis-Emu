@@ -218,6 +218,10 @@ add_executable(yuzu
 
     charis_header.h charis_header.cpp
     game_clock_dialog.h game_clock_dialog.cpp
+    charis_covers.h charis_covers.cpp
+    charis_continue.h charis_continue.cpp
+    charis_updater.h charis_updater.cpp
+    charis_version.h
 
     yuzu.qrc
     yuzu.rc
@@ -243,7 +247,7 @@ add_executable(yuzu
     game/carousel.h game/carousel.cpp
 )
 
-set_target_properties(yuzu PROPERTIES OUTPUT_NAME "eglantine")
+set_target_properties(yuzu PROPERTIES OUTPUT_NAME "CharisSwitch")
 
 # Shipped next to the executable: the NX2 switches a GUI launch cannot set another way. Read at
 # startup (LoadNx2Switches in main.cpp); a user copy in %APPDATA%\eden overrides it.
@@ -430,7 +434,7 @@ endif()
 
 target_link_libraries(yuzu PRIVATE nlohmann_json::nlohmann_json)
 target_link_libraries(yuzu PRIVATE common core input_common frontend_common network video_core qt_common)
-target_link_libraries(yuzu PRIVATE Boost::headers Qt6::Widgets Qt6::Charts Qt6::Concurrent)
+target_link_libraries(yuzu PRIVATE Boost::headers Qt6::Widgets Qt6::Charts Qt6::Concurrent Qt6::Network QuaZip::QuaZip)
 target_link_libraries(yuzu PRIVATE ${PLATFORM_LIBRARIES} Threads::Threads)
 if (ENABLE_OPENGL)
     target_link_libraries(yuzu PRIVATE glad)

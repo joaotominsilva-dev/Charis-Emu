@@ -115,6 +115,8 @@ private:
 
     /// Map of GUID of a list of corresponding virtual Joysticks
     ::Common::unordered_map<Common::UUID, std::vector<std::shared_ptr<SDLJoystick>>> joystick_map;
+    /// The pad an event should drive: its own, or the first open pad when merging is on
+    PadIdentifier RoutedIdentifier(const std::shared_ptr<SDLJoystick>& joystick);
     std::mutex joystick_map_mutex;
 
     std::atomic<bool> initialized = false;

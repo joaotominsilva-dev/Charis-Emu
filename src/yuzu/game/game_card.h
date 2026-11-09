@@ -26,6 +26,9 @@ public:
     void setSize(const QSize& newSize, const QSize& contentSize, const int padding, const int columns);
 
 private:
+    void PaintCharis(QPainter* painter, const QStyleOptionViewItem& option,
+                     const QModelIndex& index) const;
+
     static constexpr int cardMargin = 8;
 
     QSize m_size;

@@ -7,6 +7,7 @@
 #include <QAbstractItemView>
 #include <QApplication>
 #include <QDir>
+#include <QFileDialog>
 #include <QFileInfo>
 #include <QHeaderView>
 #include <QJsonArray>
@@ -15,6 +16,7 @@
 #include <QList>
 #include <QListView>
 #include <QMenu>
+#include <QMessageBox>
 #include <QScrollBar>
 #include <QScroller>
 #include <QScrollerProperties>
@@ -32,6 +34,7 @@
 #include "qt_common/game_list/model.h"
 #include "qt_common/qt_common.h"
 #include "qt_common/util/game.h"
+#include "yuzu/charis_covers.h"
 #include "yuzu/game/carousel.h"
 #include "yuzu/game/game_grid.h"
 #include "yuzu/game/game_list.h"
@@ -80,12 +83,18 @@ GameList::GameList(FileSys::VirtualFilesystem vfs_, FileSys::ManualContentProvid
                 if (!this->isActiveWindow()) {
                     return;
                 }
+                if (key == Qt::Key_Play) {
+                    emit ContinueRequested();
+                    return;
+                }
                 QKeyEvent* event = new QKeyEvent(QEvent::KeyPress, key, Qt::NoModifier);
                 QCoreApplication::postEvent(m_currentView, event);
             });
 
     connect(item_model, &GameListModel::PopulatingCompleted, this,
             &GameList::OnPopulatingCompleted);
+    connect(&CharisCovers::Instance(), &CharisCovers::CoverChanged, this,
+            [this](u64) { m_currentView->viewport()->update(); });
 
     connect(item_model, &GameListModel::ShowList, this, &GameList::ShowList);
     connect(item_model, &GameListModel::SaveConfig, this, &GameList::SaveConfig);
@@ -257,6 +266,53 @@ void GameList::OnTextChanged(const QString& new_text) {
     }
 }
 
+void GameList::ForEachGame(const std::function<void(QStandardItem*)>& callback) const {
+    const std::function<void(QStandardItem*)> walk = [&](QStandardItem* parent) {
+        for (int i = 0; i < parent->rowCount(); ++i) {
+            QStandardItem* child = parent->child(i, 0);
+            if (!child) {
+                continue;
+            }
+            if (child->data(GameListItem::TypeRole).value<GameListItemType>() ==
+                GameListItemType::Game) {
+                callback(child);
+            } else if (child->hasChildren()) {
+                walk(child);
+            }
+        }
+    };
+    walk(item_model->invisibleRootItem());
+}
+
+bool GameList::FindGame(const QString& path, GameInfo& out) const {
+    bool found = false;
+    ForEachGame([&](QStandardItem* item) {
+        if (found || item->data(GameListItemPath::FullPathRole).toString() != path) {
+            return;
+        }
+        out.path = path;
+        out.title = item->data(Qt::DisplayRole).toString().split(QLatin1Char('\n')).first();
+        out.program_id = item->data(GameListItemPath::ProgramIdRole).toULongLong();
+        out.icon = item->data(Qt::DecorationRole).value<QPixmap>();
+        const QModelIndex time_index =
+            item->index().sibling(item->row(), GameListModel::COLUMN_PLAY_TIME);
+        out.play_seconds = time_index.data(GameListItemPlayTime::PlayTimeRole).toULongLong();
+        found = true;
+    });
+    return found;
+}
+
+void GameList::RequestCovers() {
+    if (UISettings::values.theme != std::string("charis")) {
+        return;
+    }
+    ForEachGame([](QStandardItem* item) {
+        const u64 program_id = item->data(GameListItemPath::ProgramIdRole).toULongLong();
+        const QString title = item->data(Qt::DisplayRole).toString().split(QLatin1Char('\n')).first();
+        CharisCovers::Instance().Request(program_id, title);
+    });
+}
+
 void GameList::RefreshFilter() {
     OnTextChanged(search_field->filterText());
     m_currentView->viewport()->update();
@@ -288,6 +344,7 @@ void GameList::OnPopulatingCompleted(const QStringList& watch_list) {
     emit ShowList(!item_model->IsEmpty());
     RefreshFilter();
     emit HiddenGamesChanged(static_cast<int>(UISettings::values.hidden_ids.size()));
+    RequestCovers();
 
     // favorites row
     if (m_isTreeMode) {
@@ -490,6 +547,31 @@ void GameList::AddGamePopup(QMenu& context_menu, u64 program_id, const std::stri
     hide_game->setVisible(program_id != 0);
     connect(hide_game, &QAction::triggered, this,
             [this, program_id]() { ToggleHidden(program_id); });
+
+    if (program_id != 0 && UISettings::values.theme == std::string("charis")) {
+        QMenu* cover_menu = context_menu.addMenu(QStringLiteral("Capa"));
+        QAction* pick_cover = cover_menu->addAction(QStringLiteral("Escolher imagem..."));
+        QAction* search_cover = cover_menu->addAction(QStringLiteral("Buscar na internet de novo"));
+        QAction* remove_cover = cover_menu->addAction(QStringLiteral("Usar o ícone do jogo"));
+        remove_cover->setEnabled(CharisCovers::Instance().HasCover(program_id));
+        GameInfo info;
+        FindGame(QString::fromStdString(path), info);
+        const QString title = info.title;
+        connect(pick_cover, &QAction::triggered, this, [this, program_id] {
+            const QString file = QFileDialog::getOpenFileName(
+                this, QStringLiteral("Escolha a capa"), QString(),
+                QStringLiteral("Imagens (*.png *.jpg *.jpeg *.webp *.bmp)"));
+            if (!file.isEmpty() && !CharisCovers::Instance().SetCustom(program_id, file)) {
+                QMessageBox::warning(this, QStringLiteral("Capa"),
+                                     QStringLiteral("Não consegui abrir essa imagem."));
+            }
+        });
+        connect(search_cover, &QAction::triggered, this, [program_id, title] {
+            CharisCovers::Instance().Retry(program_id, title);
+        });
+        connect(remove_cover, &QAction::triggered, this,
+                [program_id] { CharisCovers::Instance().Remove(program_id); });
+    }
     context_menu.addSeparator();
     QAction* start_game = context_menu.addAction(tr("Start Game"));
     QAction* start_game_global =

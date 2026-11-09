@@ -67,6 +67,7 @@ enum class GameListOpenTarget;
 enum class DumpRomFSTarget;
 class GameListPlaceholder;
 class CharisHeader;
+class CharisContinueCard;
 
 class QtAmiiboSettingsDialog;
 class QtControllerSelectorDialog;
@@ -375,6 +376,9 @@ private slots:
     void OnConfigure();
     void OnOpenGameClock();
     void UpdateGameClockLabel();
+    void UpdateContinueCard();
+    void OnContinuePlaying();
+    void OnOpenUpdates();
     void OnConfigureTas();
     void OnDecreaseVolume();
     void OnIncreaseVolume();
@@ -521,6 +525,9 @@ private:
 
     GameListPlaceholder* game_list_placeholder = nullptr;
     CharisHeader* charis_header = nullptr;
+    QWidget* continue_area = nullptr;
+    CharisContinueCard* continue_card = nullptr;
+    QString continue_path;
 
     std::vector<VkDeviceInfo::Record> vk_device_records;
 
