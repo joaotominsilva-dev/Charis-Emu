@@ -27,6 +27,8 @@ Name "${PRODUCT_NAME}"
 OutFile "CharisSwitch-${PRODUCT_VERSION}-instalador.exe"
 SetCompressor /SOLID lzma
 InstallDir "$LOCALAPPDATA\Programs\${PRODUCT_NAME}"
+; Updates go where the previous version is, even if it was installed somewhere else
+InstallDirRegKey HKCU "${PRODUCT_UNINST_KEY}" "InstallLocation"
 ShowInstDetails show
 ShowUnInstDetails show
 BrandingText "${PRODUCT_NAME} ${PRODUCT_VERSION}"
@@ -170,28 +172,47 @@ Function FindUserDir
   FindClose $R0
 FunctionEnd
 
+
+; Windows locks the exe of a running program, so the new files could not replace it.
+; Interactive install: ask to close it. Update from inside the program (silent): wait for it to
+; close by itself, and end it if it is still open after 20 seconds.
+Function WaitForProgramToClose
+  StrCpy $R8 0
+  ${Do}
+    ${IfNot} ${FileExists} "$INSTDIR\${PRODUCT_EXE}"
+      Return
+    ${EndIf}
+    ClearErrors
+    FileOpen $R9 "$INSTDIR\${PRODUCT_EXE}" a
+    ${IfNot} ${Errors}
+      FileClose $R9
+      Return
+    ${EndIf}
+    ${If} ${Silent}
+      Sleep 500
+      IntOp $R8 $R8 + 1
+      ${If} $R8 = 40
+        nsExec::Exec 'taskkill /IM ${PRODUCT_EXE} /F'
+        Pop $R7
+        Sleep 1500
+      ${EndIf}
+      ${If} $R8 >= 70
+        Return
+      ${EndIf}
+    ${Else}
+      MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "O Charis Switch está aberto.$\r$\n$\r$\nFeche o programa e clique em Repetir para continuar a instalação." IDRETRY +2
+      Abort
+    ${EndIf}
+  ${Loop}
+FunctionEnd
+
 ; ---------- Install ----------
 
 Section "Charis Switch" SecMain
   SectionIn RO
   SetOutPath "$INSTDIR"
 
-  ; An update started from inside the program: wait until it has closed and its exe can be
-  ; replaced (up to about 30 seconds).
-  StrCpy $R8 0
-  ${Do}
-    ${IfNot} ${FileExists} "$INSTDIR\${PRODUCT_EXE}"
-      ${Break}
-    ${EndIf}
-    ClearErrors
-    FileOpen $R9 "$INSTDIR\${PRODUCT_EXE}" a
-    ${IfNot} ${Errors}
-      FileClose $R9
-      ${Break}
-    ${EndIf}
-    Sleep 500
-    IntOp $R8 $R8 + 1
-  ${LoopUntil} $R8 >= 60
+  Call WaitForProgramToClose
   Delete "$INSTDIR\eglantine.exe"
   File /r "${BINARY_SOURCE_DIR}\*"
   File "charis.ico"
