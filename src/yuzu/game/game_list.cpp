@@ -263,6 +263,11 @@ void GameList::OnTextChanged(const QString& new_text) {
     } else {
         grid_view->ApplyFilter(edit_filter_text, item_model);
         carousel_view->ApplyFilter(edit_filter_text, item_model);
+        int visible = 0;
+        for (int i = 0; i < item_model->rowCount(); ++i) {
+            visible += grid_view->isRowHidden(i) ? 0 : 1;
+        }
+        search_field->setFilterResult(visible, item_model->rowCount());
     }
 }
 
@@ -285,9 +290,19 @@ void GameList::ForEachGame(const std::function<void(QStandardItem*)>& callback) 
 }
 
 bool GameList::FindGame(const QString& path, GameInfo& out) const {
+    // Paths may differ in slashes or (on Windows) letter case and still be the same file.
+    const auto same_file = [](const QString& a, const QString& b) {
+        const QString ca = QDir::cleanPath(QDir::fromNativeSeparators(a));
+        const QString cb = QDir::cleanPath(QDir::fromNativeSeparators(b));
+#ifdef _WIN32
+        return ca.compare(cb, Qt::CaseInsensitive) == 0;
+#else
+        return ca == cb;
+#endif
+    };
     bool found = false;
     ForEachGame([&](QStandardItem* item) {
-        if (found || item->data(GameListItemPath::FullPathRole).toString() != path) {
+        if (found || !same_file(item->data(GameListItemPath::FullPathRole).toString(), path)) {
             return;
         }
         out.path = path;

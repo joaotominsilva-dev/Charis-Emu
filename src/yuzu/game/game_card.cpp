@@ -223,7 +223,9 @@ void GameCard::PaintCharis(QPainter* painter, const QStyleOptionViewItem& option
     if (metrics.boundingRect(title_rect, Qt::TextWordWrap, title).height() > title_rect.height()) {
         shown = metrics.elidedText(title, Qt::ElideRight, cover_w * 2 - 8);
     }
-    painter->drawText(title_rect, Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap, shown);
+    QRect used_rect;
+    painter->drawText(title_rect, Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap, shown,
+                      &used_rect);
 
     const QModelIndex time_index =
         index.sibling(index.row(), GameListModel::COLUMN_PLAY_TIME);
@@ -233,7 +235,7 @@ void GameCard::PaintCharis(QPainter* painter, const QStyleOptionViewItem& option
     small_font.setPixelSize(12);
     painter->setFont(small_font);
     painter->setPen(soft);
-    painter->drawText(QRect(card_rect.left() + pad, title_rect.bottom() + 2, cover_w, 18),
+    painter->drawText(QRect(card_rect.left() + pad, used_rect.bottom() + 4, cover_w, 18),
                       Qt::AlignLeft | Qt::AlignVCenter, PlayTimeText(seconds));
 
     if (marked_hidden) {

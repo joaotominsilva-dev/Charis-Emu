@@ -426,6 +426,7 @@ MainWindow::MainWindow(bool has_broken_vulkan)
         UISettings::values.language = std::string("pt_BR");
         UISettings::values.fullscreen = true;
         UISettings::values.charis_config_version = 2;
+        config->SaveAllValues();
     }
 
     LoadTranslation();
