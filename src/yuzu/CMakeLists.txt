@@ -222,6 +222,10 @@ add_executable(yuzu
     charis_continue.h charis_continue.cpp
     charis_updater.h charis_updater.cpp
     charis_version.h
+    charis_stream_controller.h charis_stream_controller.cpp
+    ../charis_stream/protocol.h
+    ../charis_stream/host.h ../charis_stream/host.cpp
+    ../charis_stream/sources.h ../charis_stream/windows_sources.cpp
 
     yuzu.qrc
     yuzu.rc
@@ -435,6 +439,15 @@ endif()
 target_link_libraries(yuzu PRIVATE nlohmann_json::nlohmann_json)
 target_link_libraries(yuzu PRIVATE common core input_common frontend_common network video_core qt_common)
 target_link_libraries(yuzu PRIVATE Boost::headers Qt6::Widgets Qt6::Charts Qt6::Concurrent Qt6::Network QuaZip::QuaZip)
+# Charis Stream: FFmpeg (capture and NVENC) and Opus for the PC host
+target_include_directories(yuzu PRIVATE ${FFmpeg_INCLUDE_DIR} ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(yuzu PRIVATE ${FFmpeg_LIBRARIES} Opus::opus)
+if (WIN32)
+    target_link_libraries(yuzu PRIVATE ws2_32 ole32 uuid d3d11 dxgi)
+endif()
+if (TARGET ffmpeg-build)
+    add_dependencies(yuzu ffmpeg-build)
+endif()
 target_link_libraries(yuzu PRIVATE ${PLATFORM_LIBRARIES} Threads::Threads)
 if (ENABLE_OPENGL)
     target_link_libraries(yuzu PRIVATE glad)

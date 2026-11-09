@@ -49,6 +49,16 @@ CharisHeader::CharisHeader(QWidget* parent) : QWidget(parent) {
     connect(update_button, &QPushButton::clicked, this, &CharisHeader::UpdateClicked);
     top_row->addWidget(update_button);
 
+    stream_button = new QPushButton(body);
+    stream_button->setObjectName(QStringLiteral("CharisPillButton"));
+    stream_button->setCheckable(true);
+    stream_button->setCursor(Qt::PointingHandCursor);
+    stream_button->setFocusPolicy(Qt::NoFocus);
+    stream_button->setToolTip(QStringLiteral("Mostrar o jogo no Switch com o app Charis Stream"));
+    connect(stream_button, &QPushButton::toggled, this, &CharisHeader::StreamToggled);
+    top_row->addWidget(stream_button);
+    SetStreamState(0);
+
     hidden_button = new QPushButton(body);
     hidden_button->setObjectName(QStringLiteral("CharisPillButton"));
     hidden_button->setCheckable(true);
@@ -138,6 +148,22 @@ void CharisHeader::SetHiddenCount(int count) {
 void CharisHeader::SetUpdateAvailable(const QString& version) {
     update_button->setText(QStringLiteral("Atualiza\u00E7\u00E3o %1 dispon\u00EDvel").arg(version));
     update_button->setVisible(!version.isEmpty());
+}
+
+void CharisHeader::SetStreamState(int state) {
+    const QSignalBlocker blocker(stream_button);
+    stream_button->setChecked(state != 0);
+    switch (state) {
+    case 1:
+        stream_button->setText(QStringLiteral("Esperando o Switch..."));
+        break;
+    case 2:
+        stream_button->setText(QStringLiteral("Transmitindo para o Switch"));
+        break;
+    default:
+        stream_button->setText(QStringLiteral("Transmitir para o Switch"));
+        break;
+    }
 }
 
 void CharisHeader::SetShowHidden(bool show) {

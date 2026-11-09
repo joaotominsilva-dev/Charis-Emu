@@ -68,6 +68,7 @@ enum class DumpRomFSTarget;
 class GameListPlaceholder;
 class CharisHeader;
 class CharisContinueCard;
+class CharisStreamController;
 
 class QtAmiiboSettingsDialog;
 class QtControllerSelectorDialog;
@@ -527,6 +528,7 @@ private:
     CharisHeader* charis_header = nullptr;
     QWidget* continue_area = nullptr;
     CharisContinueCard* continue_card = nullptr;
+    CharisStreamController* charis_stream = nullptr;
     QString continue_path;
 
     std::vector<VkDeviceInfo::Record> vk_device_records;

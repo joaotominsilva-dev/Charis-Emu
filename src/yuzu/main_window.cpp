@@ -43,12 +43,14 @@
 #include "set_play_time_dialog.h"
 #include "util/util.h"
 #include <QFontDatabase>
+#include <QSignalBlocker>
 #include <QTimer>
 #include <QVBoxLayout>
 #include "yuzu/charis_continue.h"
 #include "yuzu/charis_covers.h"
 #include "yuzu/charis_header.h"
 #include "yuzu/charis_updater.h"
+#include "yuzu/charis_stream_controller.h"
 #include "input_common/drivers/sdl_merge.h"
 #include "yuzu/game_clock_dialog.h"
 #include "yuzu/game/game_list.h"
@@ -1014,6 +1016,51 @@ void MainWindow::InitializeWidgets() {
     connect(game_clock_action, &QAction::triggered, this, &MainWindow::OnOpenGameClock);
     ui->menu_Emulation->addSeparator();
     ui->menu_Emulation->addAction(game_clock_action);
+
+    charis_stream = new CharisStreamController(input_subsystem, *QtCommon::system, this);
+    auto* stream_action = new QAction(QStringLiteral("Transmitir para o Switch"), this);
+    stream_action->setCheckable(true);
+    const auto set_streaming = [this, stream_action](bool on) {
+        if (on) {
+            QString error;
+            if (!charis_stream->Start(error)) {
+                QMessageBox::warning(this, QStringLiteral("Charis Stream"), error);
+                on = false;
+            }
+        } else {
+            charis_stream->Stop();
+        }
+        const QSignalBlocker blocker(stream_action);
+        stream_action->setChecked(on);
+        charis_header->SetStreamState(on ? 1 : 0);
+    };
+    connect(stream_action, &QAction::toggled, this, set_streaming);
+    connect(charis_header, &CharisHeader::StreamToggled, this, set_streaming);
+    connect(charis_stream, &CharisStreamController::SessionChanged, this,
+            [this](bool connected, const QString&) {
+                if (charis_stream->IsRunning()) {
+                    charis_header->SetStreamState(connected ? 2 : 1);
+                }
+            });
+    connect(charis_stream, &CharisStreamController::GoHomeRequested, this, [this] {
+        // Same as Stop, without the confirmation: the request comes from the Switch app
+        if (emulation_running) {
+            play_time_manager->Stop();
+            if (OnShutdownBegin()) {
+                OnShutdownBeginDialog();
+            } else {
+                OnEmulationStopped();
+            }
+        }
+        showMaximized();
+        raise();
+        activateWindow();
+    });
+    connect(charis_stream, &CharisStreamController::ErrorRaised, this,
+            [this](const QString& message) {
+                QMessageBox::warning(this, QStringLiteral("Charis Stream"), message);
+            });
+    ui->menu_Emulation->addAction(stream_action);
 
     auto* smooth_action = new QAction(QStringLiteral("Ativar modo fluido"), this);
     connect(smooth_action, &QAction::triggered, this, [this] {

@@ -54,6 +54,11 @@ if (NOT YUZU_USE_BUNDLED_FFMPEG)
             # Only used for subtitle charset conversion, and the MinGW iconv signature
             # does not match what FFmpeg expects with newer GCC
             list(APPEND FFmpeg_CROSS_COMPILE_FLAGS --disable-iconv)
+            # Charis Stream: capture the screen on the GPU, scale it there and encode on NVIDIA
+            list(APPEND FFmpeg_CROSS_COMPILE_FLAGS
+                --enable-ffnvcodec --enable-nvenc --enable-encoder=h264_nvenc
+                --enable-d3d11va --enable-filter=ddagrab --enable-filter=scale_d3d11
+                --enable-filter=buffersink --enable-filter=format)
         endif()
         if (DEFINED FFmpeg_CROSS_PREFIX)
             list(APPEND FFmpeg_CROSS_COMPILE_FLAGS --cross-prefix="${FFmpeg_CROSS_PREFIX}")

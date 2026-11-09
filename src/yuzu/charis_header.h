@@ -28,10 +28,13 @@ public:
     void SetHiddenCount(int count);
     void SetShowHidden(bool show);
     void SetUpdateAvailable(const QString& version);
+    // 0 off, 1 waiting for the Switch, 2 streaming
+    void SetStreamState(int state);
 
 signals:
     void GameClockClicked();
     void UpdateClicked();
+    void StreamToggled(bool on);
     void ShowHiddenToggled(bool show);
 
 protected:
@@ -45,6 +48,7 @@ private:
     QPushButton* game_clock_button = nullptr;
     QPushButton* hidden_button = nullptr;
     QPushButton* update_button = nullptr;
+    QPushButton* stream_button = nullptr;
     QTimer* clock_timer = nullptr;
     QWidget* page = nullptr;
     QList<QWidget*> watched;
