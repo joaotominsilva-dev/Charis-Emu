@@ -1116,9 +1116,8 @@ void MainWindow::InitializeWidgets() {
     connect(charis_header, &CharisHeader::UpdateClicked, this, &MainWindow::OnOpenUpdates);
     connect(&CharisUpdater::Instance(), &CharisUpdater::UpdateFound, charis_header,
             &CharisHeader::SetUpdateAvailable);
-    if (!UISettings::values.charis_update_folder.GetValue().empty()) {
-        QTimer::singleShot(8000, this, [] { CharisUpdater::Instance().Check(); });
-    }
+    // Look for a newer version in the Charis Drive folder a few seconds after opening
+    QTimer::singleShot(8000, this, [] { CharisUpdater::Instance().Check(); });
 
     loading_screen = new LoadingScreen(this);
     loading_screen->hide();

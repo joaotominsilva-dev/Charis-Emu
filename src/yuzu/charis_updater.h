@@ -70,7 +70,6 @@ private:
     void SetStatus(const QString& text, bool error);
 
     bool game_running = false;
-    QLineEdit* folder = nullptr;
     QLabel* status = nullptr;
     QProgressBar* progress = nullptr;
     QPushButton* check = nullptr;

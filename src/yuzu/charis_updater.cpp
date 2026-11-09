@@ -25,6 +25,9 @@
 
 namespace {
 
+// The Charis Google Drive folder where new installers are published
+constexpr char UpdateFolderId[] = "1P2t73x12kJYaz3Xo4rmdZ7bUWmF1SInQ";
+
 const QRegularExpression InstallerName(
     QStringLiteral("^CharisSwitch-(\\d+\\.\\d+\\.\\d+)-instalador\\.exe$"),
     QRegularExpression::CaseInsensitiveOption);
@@ -70,13 +73,7 @@ void CharisUpdater::Check() {
     if (busy) {
         return;
     }
-    const QString folder_id =
-        FolderId(QString::fromStdString(UISettings::values.charis_update_folder.GetValue()));
-    if (folder_id.isEmpty()) {
-        emit Status(QStringLiteral("Cole o link da pasta do Google Drive onde ficam os instaladores."),
-                    true);
-        return;
-    }
+    const QString folder_id = QStringLiteral(UpdateFolderId);
     busy = true;
     found_version.clear();
     found_file_id.clear();
@@ -232,21 +229,15 @@ CharisUpdateDialog::CharisUpdateDialog(bool game_running_, QWidget* parent)
     title->setObjectName(QStringLiteral("DialogTitle"));
     layout->addWidget(title);
     auto* text = new QLabel(
-        QStringLiteral("Você está na versão %1. Coloque o instalador novo "
-                       "(CharisSwitch-X.Y.Z-instalador.exe, sem mudar o nome) numa pasta do "
-                       "Google Drive compartilhada com \"Qualquer pessoa com o link\" e cole o "
-                       "link da pasta aqui. Seus jogos, saves e configurações ficam "
-                       "como estão.")
+        QStringLiteral("Você está na versão %1. As versões novas vêm da pasta do Charis "
+                       "Switch no Google Drive. Seus jogos, saves e configurações ficam como "
+                       "estão.")
             .arg(CharisUpdater::CurrentVersion()),
         this);
     text->setObjectName(QStringLiteral("DialogText"));
     text->setWordWrap(true);
     layout->addWidget(text);
 
-    folder = new QLineEdit(this);
-    folder->setPlaceholderText(QStringLiteral("https://drive.google.com/drive/folders/..."));
-    folder->setText(QString::fromStdString(UISettings::values.charis_update_folder.GetValue()));
-    layout->addWidget(folder);
 
     status = new QLabel(this);
     status->setObjectName(QStringLiteral("DialogPreview"));
@@ -276,7 +267,6 @@ CharisUpdateDialog::CharisUpdateDialog(bool game_running_, QWidget* parent)
     auto& updater = CharisUpdater::Instance();
     connect(close, &QPushButton::clicked, this, &QDialog::reject);
     connect(check, &QPushButton::clicked, this, [this, &updater] {
-        UISettings::values.charis_update_folder = folder->text().trimmed().toStdString();
         update->setEnabled(false);
         updater.Check();
     });
