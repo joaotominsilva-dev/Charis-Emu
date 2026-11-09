@@ -73,7 +73,7 @@ void CharisUpdater::Check() {
     if (busy) {
         return;
     }
-    const QString folder_id = QStringLiteral(UpdateFolderId);
+    const QString folder_id = QString::fromLatin1(UpdateFolderId);
     busy = true;
     found_version.clear();
     found_file_id.clear();
