@@ -150,6 +150,10 @@ void CharisHeader::SetUpdateAvailable(const QString& version) {
     update_button->setVisible(!version.isEmpty());
 }
 
+void CharisHeader::SetStreamAvailable(bool available) {
+    stream_button->setVisible(available);
+}
+
 void CharisHeader::SetStreamState(int state) {
     const QSignalBlocker blocker(stream_button);
     stream_button->setChecked(state != 0);

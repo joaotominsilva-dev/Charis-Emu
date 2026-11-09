@@ -3,6 +3,9 @@
 
 #pragma once
 
+#include <algorithm>
+
+#include <QDir>
 #include <QStandardItem>
 #include <QStringList>
 
@@ -11,9 +14,24 @@
 
 namespace Yuzu {
 
+inline QString HiddenKey(const QString& path) {
+    return QDir::cleanPath(QDir::fromNativeSeparators(path)).toLower();
+}
+
+// Hidden by file (one entry), or, from older versions, by game (every entry of that game)
+inline bool IsEntryMarkedHidden(u64 program_id, const QString& path) {
+    if (program_id != 0 && UISettings::values.hidden_ids.contains(program_id)) {
+        return true;
+    }
+    const QString key = HiddenKey(path);
+    return std::any_of(UISettings::values.hidden_paths.cbegin(),
+                       UISettings::values.hidden_paths.cend(),
+                       [&](const QString& hidden) { return HiddenKey(hidden) == key; });
+}
+
 inline bool IsGameMarkedHidden(const QStandardItem* item) {
-    const u64 program_id = item->data(GameListItemPath::ProgramIdRole).toULongLong();
-    return program_id != 0 && UISettings::values.hidden_ids.contains(program_id);
+    return IsEntryMarkedHidden(item->data(GameListItemPath::ProgramIdRole).toULongLong(),
+                               item->data(GameListItemPath::FullPathRole).toString());
 }
 
 // Hidden games stay out of the home screen unless the user asked to see them.

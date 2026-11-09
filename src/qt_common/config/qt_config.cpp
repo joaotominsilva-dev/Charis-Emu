@@ -313,6 +313,15 @@ void QtConfig::ReadUIGamelistValues() {
     }
     EndArray();
 
+    UISettings::values.hidden_paths.clear();
+    const int hidden_paths_size = BeginArray("hidden_paths");
+    for (int i = 0; i < hidden_paths_size; i++) {
+        SetArrayIndex(i);
+        UISettings::values.hidden_paths.append(
+            QString::fromStdString(ReadStringSetting(std::string("path"))));
+    }
+    EndArray();
+
     const int linked_size = BeginArray("ryujinx_linked");
     for (int i = 0; i < linked_size; ++i) {
         SetArrayIndex(i);
@@ -542,6 +551,13 @@ void QtConfig::SaveUIGamelistValues() {
         WriteIntegerSetting(std::string("program_id"), UISettings::values.hidden_ids[i]);
     }
     EndArray(); // hidden
+
+    BeginArray(std::string("hidden_paths"));
+    for (int i = 0; i < UISettings::values.hidden_paths.size(); i++) {
+        SetArrayIndex(i);
+        WriteStringSetting(std::string("path"), UISettings::values.hidden_paths[i].toStdString());
+    }
+    EndArray(); // hidden_paths
 
     BeginArray(std::string("ryujinx_linked"));
     int i = 0;

@@ -9,6 +9,7 @@
 #include "qt_common/game_list/game_list_p.h"
 #include "qt_common/game_list/model.h"
 #include "yuzu/charis_covers.h"
+#include "yuzu/game/common.h"
 
 GameCard::GameCard(QObject* parent) : QStyledItemDelegate{parent} {
     setObjectName("GameCard");
@@ -60,7 +61,8 @@ void GameCard::paint(QPainter* painter, const QStyleOptionViewItem& option,
 
     // A hidden game only shows up when "show hidden" is on; it is drawn faded with a tag.
     const u64 program_id = index.data(GameListItemPath::ProgramIdRole).toULongLong();
-    const bool marked_hidden = program_id != 0 && UISettings::values.hidden_ids.contains(program_id);
+    const bool marked_hidden = Yuzu::IsEntryMarkedHidden(
+        program_id, index.data(GameListItemPath::FullPathRole).toString());
     if (marked_hidden) {
         painter->setOpacity(0.45);
     }
@@ -171,8 +173,8 @@ void GameCard::PaintCharis(QPainter* painter, const QStyleOptionViewItem& option
     }
 
     const u64 program_id = index.data(GameListItemPath::ProgramIdRole).toULongLong();
-    const bool marked_hidden =
-        program_id != 0 && UISettings::values.hidden_ids.contains(program_id);
+    const bool marked_hidden = Yuzu::IsEntryMarkedHidden(
+        program_id, index.data(GameListItemPath::FullPathRole).toString());
     if (marked_hidden) {
         painter->setOpacity(0.45);
     }
@@ -192,21 +194,16 @@ void GameCard::PaintCharis(QPainter* painter, const QStyleOptionViewItem& option
     clip.addRoundedRect(cover_rect, 14, 14);
     painter->save();
     painter->setClipPath(clip);
-    const QPixmap cover = CharisCovers::Instance().Cover(program_id, cover_rect.size());
+    auto& covers = CharisCovers::Instance();
+    QPixmap cover = covers.Cover(program_id, cover_rect.size());
+    if (cover.isNull()) {
+        cover = covers.IconCover(index.data(Qt::DecorationRole).value<QPixmap>(),
+                                 cover_rect.size());
+    }
     if (!cover.isNull()) {
         painter->drawPixmap(cover_rect, cover);
     } else {
         painter->fillRect(cover_rect, panel);
-        const QPixmap icon = index.data(Qt::DecorationRole).value<QPixmap>();
-        if (!icon.isNull()) {
-            const int side = std::min(cover_w - 32, 200);
-            const QRect icon_rect(cover_rect.center().x() - side / 2,
-                                  cover_rect.center().y() - side / 2, side, side);
-            QPainterPath icon_clip;
-            icon_clip.addRoundedRect(icon_rect, 12, 12);
-            painter->setClipPath(icon_clip);
-            painter->drawPixmap(icon_rect, icon);
-        }
     }
     painter->restore();
 

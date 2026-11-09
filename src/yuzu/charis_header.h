@@ -30,6 +30,7 @@ public:
     void SetUpdateAvailable(const QString& version);
     // 0 off, 1 waiting for the Switch, 2 streaming
     void SetStreamState(int state);
+    void SetStreamAvailable(bool available);
 
 signals:
     void GameClockClicked();

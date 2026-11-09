@@ -225,6 +225,8 @@ struct Values {
     QVector<u64> favorited_ids;
     // Games hidden from the home screen, and whether they are shown anyway
     QVector<u64> hidden_ids;
+    // Entries hidden one by one by file, so a game and its update can be hidden apart
+    QStringList hidden_paths;
     Setting<bool> show_hidden_games{linkage, false, "show_hidden_games", Category::UiGameList};
     QMap<u64, QDir> ryujinx_link_paths;
 

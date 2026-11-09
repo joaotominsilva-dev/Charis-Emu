@@ -36,6 +36,7 @@
 #include "qt_common/util/game.h"
 #include "yuzu/charis_covers.h"
 #include "yuzu/game/carousel.h"
+#include "yuzu/game/common.h"
 #include "yuzu/game/game_grid.h"
 #include "yuzu/game/game_list.h"
 #include "yuzu/game/game_tree.h"
@@ -339,15 +340,22 @@ void GameList::SetShowHiddenGames(bool show) {
     emit SaveConfig();
 }
 
-void GameList::ToggleHidden(u64 program_id) {
-    auto& hidden = UISettings::values.hidden_ids;
-    if (hidden.contains(program_id)) {
-        hidden.removeAll(program_id);
+void GameList::ToggleHidden(u64 program_id, const QString& path) {
+    auto& by_game = UISettings::values.hidden_ids;
+    auto& by_file = UISettings::values.hidden_paths;
+    if (by_game.contains(program_id)) {
+        // Hidden by an older version for the whole game: show it again, entry by entry from now on
+        by_game.removeAll(program_id);
     } else {
-        hidden.append(program_id);
+        const QString key = Yuzu::HiddenKey(path);
+        const qsizetype removed = by_file.removeIf(
+            [&](const QString& hidden) { return Yuzu::HiddenKey(hidden) == key; });
+        if (removed == 0) {
+            by_file.append(path);
+        }
     }
     RefreshFilter();
-    emit HiddenGamesChanged(static_cast<int>(hidden.size()));
+    emit HiddenGamesChanged(static_cast<int>(by_game.size() + by_file.size()));
     emit SaveConfig();
 }
 
@@ -358,7 +366,8 @@ void GameList::OnFilterCloseClicked() {
 void GameList::OnPopulatingCompleted(const QStringList& watch_list) {
     emit ShowList(!item_model->IsEmpty());
     RefreshFilter();
-    emit HiddenGamesChanged(static_cast<int>(UISettings::values.hidden_ids.size()));
+    emit HiddenGamesChanged(static_cast<int>(UISettings::values.hidden_ids.size() +
+                                             UISettings::values.hidden_paths.size()));
     RequestCovers();
 
     // favorites row
@@ -555,13 +564,13 @@ void GameList::PopupContextMenu(const QPoint& menu_location) {
 void GameList::AddGamePopup(QMenu& context_menu, u64 program_id, const std::string& path) {
     // TODO(crueter): Refactor this and make it less bad
     QAction* favorite = context_menu.addAction(tr("Favorite"));
-    const bool is_hidden = UISettings::values.hidden_ids.contains(program_id);
+    const bool is_hidden = Yuzu::IsEntryMarkedHidden(program_id, QString::fromStdString(path));
     QAction* hide_game = context_menu.addAction(is_hidden
                                                     ? QStringLiteral("Mostrar na tela inicial")
                                                     : QStringLiteral("Ocultar da tela inicial"));
     hide_game->setVisible(program_id != 0);
     connect(hide_game, &QAction::triggered, this,
-            [this, program_id]() { ToggleHidden(program_id); });
+            [this, program_id, path]() { ToggleHidden(program_id, QString::fromStdString(path)); });
 
     if (program_id != 0 && UISettings::values.theme == std::string("charis")) {
         QMenu* cover_menu = context_menu.addMenu(QStringLiteral("Capa"));

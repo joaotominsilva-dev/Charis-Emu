@@ -86,6 +86,10 @@ void CharisContinueCard::SetGame(const QString& game_title, u64 program_id, cons
                                  qulonglong play_seconds) {
     title->setText(game_title);
     detail->setText(Detail(play_seconds));
-    const QPixmap box = CharisCovers::Instance().Cover(program_id, CoverSize);
-    cover->setPixmap(Rounded(box.isNull() ? icon : box, CoverSize, 10));
+    auto& covers = CharisCovers::Instance();
+    QPixmap box = covers.Cover(program_id, CoverSize);
+    if (box.isNull()) {
+        box = covers.IconCover(icon, CoverSize);
+    }
+    cover->setPixmap(Rounded(box, CoverSize, 10));
 }

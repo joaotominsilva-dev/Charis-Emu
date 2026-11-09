@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
 #include "qt_common/util/game.h"
 
 #include "common/fs/fs.h"
@@ -150,8 +151,14 @@ bool MakeShortcutIcoPath(const u64 program_id, const std::string_view game_file_
     }
 
     // Create icon file path
-    out_icon_path /= (program_id == 0 ? fmt::format("eden-{}.{}", game_file_name, ico_extension)
-                                      : fmt::format("eden-{:016X}.{}", program_id, ico_extension));
+    const std::string icon_name =
+        program_id == 0 ? fmt::format("eden-{}.{}", game_file_name, ico_extension)
+                        : fmt::format("eden-{:016X}.{}", program_id, ico_extension);
+#ifdef _WIN32
+    out_icon_path /= std::filesystem::path{QString::fromStdString(icon_name).toStdWString()};
+#else
+    out_icon_path /= icon_name;
+#endif
     return true;
 }
 
@@ -401,14 +408,25 @@ inline constexpr bool CreateShortcutMessagesGUI(ShortcutMessages imsg, const QSt
     }
 }
 
+namespace {
+// Windows paths such as "OneDrive\Área de Trabalho" must not go through the ANSI code page.
+std::filesystem::path PathFromUtf8(const std::string& utf8) {
+#ifdef _WIN32
+    return std::filesystem::path{QString::fromStdString(utf8).toStdWString()};
+#else
+    return std::filesystem::path{utf8};
+#endif
+}
+} // namespace
+
 void CreateShortcut(const std::string& game_path, const u64 program_id,
                     const std::string& game_title_, const ShortcutTarget& target,
-                    std::string arguments_, const bool needs_title) {
+                    std::string arguments_, const bool needs_title) try {
     // Get path to Eden executable
     std::filesystem::path command = GetEdenCommand();
 
     // Shortcut path
-    std::filesystem::path shortcut_path = GetShortcutPath(target);
+    std::filesystem::path shortcut_path = PathFromUtf8(GetShortcutPath(target));
 
     if (!std::filesystem::exists(shortcut_path)) {
         CreateShortcutMessagesGUI(ShortcutMessages::Failed,
@@ -420,8 +438,10 @@ void CreateShortcut(const std::string& game_path, const u64 program_id,
     const FileSys::PatchManager pm{program_id, QtCommon::system->GetFileSystemController(),
                                    QtCommon::system->GetContentProvider()};
     const auto control = pm.GetControlMetadata();
-    const auto loader = Loader::GetLoader(
-        *QtCommon::system, QtCommon::vfs->OpenFile(game_path, FileSys::OpenMode::Read));
+    // Dumps kept as folders have no single file to open, so there may be no loader
+    const auto game_file = QtCommon::vfs->OpenFile(game_path, FileSys::OpenMode::Read);
+    const auto loader =
+        game_file != nullptr ? Loader::GetLoader(*QtCommon::system, game_file) : nullptr;
 
     std::string game_title{game_title_};
 
@@ -430,17 +450,15 @@ void CreateShortcut(const std::string& game_path, const u64 program_id,
         game_title = fmt::format("{:016X}", program_id);
         if (control.first != nullptr) {
             game_title = control.first->GetApplicationName();
-        } else {
+        } else if (loader != nullptr) {
             loader->ReadTitle(game_title);
         }
     }
 
     const std::string illegal_chars = "<>:\"/\\|?*.";
-    for (auto it = game_title.rbegin(); it != game_title.rend(); ++it) {
-        if (illegal_chars.find(*it) != std::string::npos) {
-            game_title.erase(it.base() - 1);
-        }
-    }
+    game_title.erase(std::remove_if(game_title.begin(), game_title.end(),
+                                    [&](char c) { return illegal_chars.find(c) != std::string::npos; }),
+                     game_title.end());
 
     const QString qgame_title = QString::fromStdString(game_title);
 
@@ -448,15 +466,19 @@ void CreateShortcut(const std::string& game_path, const u64 program_id,
     std::vector<u8> icon_image_file{};
     if (control.second != nullptr) {
         icon_image_file = control.second->ReadAllBytes();
-    } else if (loader->ReadIcon(icon_image_file) != Loader::ResultStatus::Success) {
+    } else if (loader == nullptr ||
+               loader->ReadIcon(icon_image_file) != Loader::ResultStatus::Success) {
         LOG_WARNING(Frontend, "Could not read icon from {:s}", game_path);
     }
 
     QImage icon_data =
         QImage::fromData(icon_image_file.data(), static_cast<int>(icon_image_file.size()));
+    if (icon_data.isNull()) {
+        icon_data = QImage(QStringLiteral(":/icons/default/256x256/eglantine.png"));
+    }
     std::filesystem::path out_icon_path;
     if (QtCommon::Game::MakeShortcutIcoPath(program_id, game_title, out_icon_path)) {
-        if (!SaveIconToFile(out_icon_path, icon_data)) {
+        if (icon_data.isNull() || !SaveIconToFile(out_icon_path, icon_data)) {
             LOG_ERROR(Frontend, "Could not write icon to file");
         }
     } else {
@@ -482,7 +504,7 @@ void CreateShortcut(const std::string& game_path, const u64 program_id,
     if (CreateShortcutMessagesGUI(ShortcutMessages::Fullscreen, qgame_title)) {
         arguments = "-f " + arguments;
     }
-    const std::string comment = fmt::format("Start {:s} with the Eden Emulator", game_title);
+    const std::string comment = fmt::format("Abrir {:s} no Charis Switch", game_title);
     const std::string categories = "Game;Emulator;Qt;";
     const std::string keywords = "Switch;Nintendo;";
 
@@ -492,6 +514,9 @@ void CreateShortcut(const std::string& game_path, const u64 program_id,
         return;
     }
     CreateShortcutMessagesGUI(ShortcutMessages::Failed, qgame_title);
+} catch (const std::exception& e) {
+    LOG_ERROR(Frontend, "Creating the shortcut failed: {}", e.what());
+    CreateShortcutMessagesGUI(ShortcutMessages::Failed, QString::fromStdString(game_title_));
 }
 
 // TODO: You want this to be constexpr? Well too bad, clang19 doesn't believe this is a string

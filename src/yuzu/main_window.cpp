@@ -997,7 +997,8 @@ void MainWindow::InitializeWidgets() {
     charis_header->Track(library_page, {game_list, game_list_placeholder});
 
     charis_header->SetShowHidden(UISettings::values.show_hidden_games.GetValue());
-    charis_header->SetHiddenCount(static_cast<int>(UISettings::values.hidden_ids.size()));
+    charis_header->SetHiddenCount(static_cast<int>(UISettings::values.hidden_ids.size() +
+                                                   UISettings::values.hidden_paths.size()));
     connect(charis_header, &CharisHeader::ShowHiddenToggled, game_list,
             &GameList::SetShowHiddenGames);
     connect(game_list, &GameList::HiddenGamesChanged, charis_header,
@@ -1060,7 +1061,12 @@ void MainWindow::InitializeWidgets() {
             [this](const QString& message) {
                 QMessageBox::warning(this, QStringLiteral("Charis Stream"), message);
             });
-    ui->menu_Emulation->addAction(stream_action);
+    // Charis Stream stays out of sight until it has been tested end to end
+    constexpr bool charis_stream_ready = false;
+    charis_header->SetStreamAvailable(charis_stream_ready);
+    if (charis_stream_ready) {
+        ui->menu_Emulation->addAction(stream_action);
+    }
 
     auto* smooth_action = new QAction(QStringLiteral("Ativar modo fluido"), this);
     connect(smooth_action, &QAction::triggered, this, [this] {
@@ -2968,6 +2974,13 @@ void MainWindow::OnGameListCreateShortcut(u64 program_id, const std::string& gam
     // Create shortcu
     std::string arguments = fmt::format("-g \"{:s}\"", game_path);
 
+    // Name the shortcut like the home screen does; dumps kept as folders have no file to read
+    GameList::GameInfo info;
+    if (game_list->FindGame(QString::fromStdString(game_path), info) && !info.title.isEmpty()) {
+        QtCommon::Game::CreateShortcut(game_path, program_id, info.title.toStdString(), target,
+                                       arguments, false);
+        return;
+    }
     QtCommon::Game::CreateShortcut(game_path, program_id, "", target, arguments, true);
 }
 

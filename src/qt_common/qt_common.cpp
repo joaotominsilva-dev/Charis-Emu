@@ -289,8 +289,13 @@ std::filesystem::path GetEdenCommand() {
     if (!appimage.isEmpty()) {
         command = std::filesystem::path{appimage.toStdString()};
     } else {
+#ifdef _WIN32
+        // Wide string: the install path may have characters outside the ANSI code page
+        command = std::filesystem::path{QCoreApplication::applicationFilePath().toStdWString()};
+#else
         const QStringList args = QGuiApplication::arguments();
         command = args[0].toStdString();
+#endif
     }
 
     // If relative path, make it an absolute path

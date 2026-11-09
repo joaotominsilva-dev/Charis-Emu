@@ -154,7 +154,7 @@ private:
     void ValidateEntry(const QModelIndex& item);
 
     void ToggleFavorite(u64 program_id);
-    void ToggleHidden(u64 program_id);
+    void ToggleHidden(u64 program_id, const QString& path);
     void ForEachGame(const std::function<void(QStandardItem*)>& callback) const;
     void RequestCovers();
 

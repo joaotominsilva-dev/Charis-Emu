@@ -7,6 +7,7 @@
 #include <QFileInfo>
 #include <QFutureWatcher>
 #include <QImage>
+#include <QPainter>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
@@ -192,6 +193,35 @@ QPixmap CharisCovers::Cover(u64 program_id, const QSize& size) {
                                         size.height());
     scaled.insert(key, cropped);
     return cropped;
+}
+
+QPixmap CharisCovers::IconCover(const QPixmap& icon, const QSize& size) {
+    if (icon.isNull() || size.isEmpty()) {
+        return {};
+    }
+    const QString key = QStringLiteral("icon:%1:%2x%3")
+                            .arg(icon.cacheKey())
+                            .arg(size.width())
+                            .arg(size.height());
+    if (const auto it = scaled.constFind(key); it != scaled.cend()) {
+        return *it;
+    }
+    QPixmap out(size);
+    out.fill(QColor(0x20, 0x21, 0x1C));
+    QPainter painter(&out);
+    painter.setRenderHint(QPainter::SmoothPixmapTransform);
+    // Shrinking to a few pixels and back gives a soft blur of the icon's colors
+    const QPixmap tiny = icon.scaled(QSize(8, 8), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    const QPixmap blurred = tiny.scaled(size, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
+    painter.drawPixmap((size.width() - blurred.width()) / 2, (size.height() - blurred.height()) / 2,
+                       blurred);
+    painter.fillRect(out.rect(), QColor(0x20, 0x21, 0x1C, 70));
+    const int side = std::min(size.width(), size.height());
+    const QPixmap fit = icon.scaled(QSize(side, side), Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    painter.drawPixmap((size.width() - fit.width()) / 2, (size.height() - fit.height()) / 2, fit);
+    painter.end();
+    scaled.insert(key, out);
+    return out;
 }
 
 void CharisCovers::ClearCache(u64 program_id) {
