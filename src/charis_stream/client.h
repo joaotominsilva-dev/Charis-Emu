@@ -38,6 +38,8 @@ struct ClientStats {
     uint32_t lost_frames = 0;    // could not be rebuilt
     uint32_t rebuilt_pieces = 0; // pieces recovered from parity
     uint32_t bitrate_kbps = 0;   // what the PC is asked to send now
+    uint32_t parity_percent = 0;
+    float loss_percent = 0;      // packets lost on the way, last second
 };
 
 // The Switch side of Charis Stream, without the screen: finds PCs of the account on the home
@@ -72,24 +74,34 @@ public:
     void RequestBitrate(uint32_t bitrate_kbps); // new ceiling chosen by the user
 
 private:
+    struct Block {
+        uint32_t first = 0;      // first piece of the frame in this block
+        uint8_t data_count = 0;
+        uint8_t parity_count = 0;
+        uint8_t missing = 0;     // data pieces not here yet
+        uint8_t parity_have = 0;
+        size_t length = 0;
+        bool done = false;
+        std::vector<uint8_t> parity;
+        std::vector<uint8_t> have; // data_count + parity_count flags
+    };
     struct Assembly {
-        uint16_t data_count = 0;
-        uint16_t parity_count = 0;
         uint32_t frame_size = 0;
         bool keyframe = false;
         bool complete = false;
-        uint16_t missing = 0;
+        uint32_t blocks_left = 0;
         std::vector<uint8_t> data;
-        std::vector<uint8_t> parity;
-        std::vector<uint8_t> have;
+        std::vector<Block> blocks;
     };
 
     void Loop();
     void HandleClear(const Header& header, const uint8_t* body, long size, const Address& from);
     void HandleSealed(const uint8_t* packet, size_t size, const Header& header);
     void HandleVideo(const uint8_t* body, size_t size);
-    void Recover(Assembly& assembly);
+    void Recover(Assembly& assembly, Block& block);
+    void Adapt(int64_t now);
     void Deliver();
+    bool AcceptCounter(uint64_t counter);
     void NoteLoss();
     void Fail(const std::string& reason);
     void SendSealed(Type type, const uint8_t* payload, size_t size);
@@ -132,11 +144,19 @@ private:
     int64_t last_packet_ms = 0;
     uint32_t last_audio_sequence = 0;
     bool have_audio = false;
-    std::deque<int64_t> loss_events;
+    std::deque<int64_t> loss_events; // frames that could not be rebuilt
     uint32_t current_bitrate = 0;
     uint32_t applied_target = 0;
     std::atomic<uint32_t> target_bitrate{0};
-    int64_t last_bitrate_change_ms = 0;
+    uint32_t parity_percent = 20;
+    int64_t last_decrease_ms = 0;
+    int64_t last_increase_ms = 0;
+    int64_t last_bitrate_sent_ms = 0;
+    int clean_seconds = 0;
+    uint64_t window_start_counter = 0;
+    uint64_t window_received = 0;
+    uint64_t highest_counter = 0;
+    uint64_t seen_window = 0;
 };
 
 } // namespace CharisStream

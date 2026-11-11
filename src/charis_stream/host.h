@@ -88,6 +88,9 @@ private:
     void EndSession(bool notify_client);
     void VideoLoop(std::shared_ptr<Session> session);
     void AudioLoop(std::shared_ptr<Session> session);
+    void SendFrame(Session& session, std::vector<uint8_t>& frame, uint32_t number, bool keyframe,
+                   int64_t frame_interval_us, std::vector<uint8_t>& plain,
+                   std::vector<uint8_t>& sealed, std::vector<uint8_t>& parity);
     void SendSealed(Session& session, Type type, const uint8_t* payload, size_t size,
                     uint8_t* scratch);
 

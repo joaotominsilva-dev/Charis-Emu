@@ -84,24 +84,54 @@ struct StartRequest {
     uint32_t bitrate_kbps;
 };
 
+// The Switch tunes the picture to the network it sees: lower rate and more parity when
+// pieces go missing.
 struct SetBitrate {
     uint32_t bitrate_kbps;
-};
-
-// A frame is cut into data_count pieces of ChunkBytes (the last may be shorter), followed by
-// parity_count parity pieces. Parity piece p is the XOR of the data pieces whose index is
-// p modulo parity_count, so one lost piece per group can be rebuilt, and a burst of up to
-// parity_count lost pieces in a row still leaves at most one hole per group.
-struct VideoChunk {
-    uint32_t frame;        // increases by one per encoded frame
-    uint16_t index;        // 0..data_count-1 data, then parity
-    uint16_t data_count;
-    uint16_t parity_count;
-    uint16_t reserved;
-    uint32_t frame_size;   // bytes in the whole frame
-    uint8_t keyframe;
+    uint8_t parity_percent;
     uint8_t pad[3];
 };
+
+// A frame is cut into pieces of ChunkBytes (the last may be shorter), split evenly into
+// blocks of at most Fec::MaxData pieces (see BlockRange). Each block sends its data pieces and
+// then parity_count Reed-Solomon parity pieces, so any parity_count lost pieces of a block can
+// be rebuilt.
+struct VideoChunk {
+    uint32_t frame;      // increases by one per encoded frame
+    uint32_t frame_size; // bytes in the whole frame
+    uint8_t shard;       // inside the block: 0..data_count-1 data, then parity
+    uint8_t block;
+    uint8_t block_count;
+    uint8_t data_count;
+    uint8_t parity_count;
+    uint8_t keyframe;
+    uint8_t reserved[2];
+};
+
+constexpr int MaxBlockData = 64;
+constexpr size_t MaxFrameBytes = 4u * 1024 * 1024;
+
+inline uint32_t PieceCount(uint32_t frame_size) {
+    return static_cast<uint32_t>((frame_size + ChunkBytes - 1) / ChunkBytes);
+}
+inline uint32_t BlockCount(uint32_t pieces) {
+    return (pieces + MaxBlockData - 1) / MaxBlockData;
+}
+// The pieces of block b: first, and how many
+inline void BlockRange(uint32_t pieces, uint32_t blocks, uint32_t b, uint32_t& first,
+                       uint32_t& count) {
+    first = b * pieces / blocks;
+    count = (b + 1) * pieces / blocks - first;
+}
+// Bytes of every piece of a block as sent (parity pieces have this size too)
+inline size_t BlockLength(uint32_t frame_size, uint32_t first, uint32_t count) {
+    const size_t rest = frame_size - size_t{first} * ChunkBytes;
+    return count > 1 ? ChunkBytes : (rest < ChunkBytes ? rest : ChunkBytes);
+}
+inline uint8_t ParityFor(uint32_t data_count, uint32_t percent) {
+    const uint32_t parity = (data_count * percent + 99) / 100;
+    return static_cast<uint8_t>(parity < 2 ? 2 : (parity > 64 ? 64 : parity));
+}
 
 struct AudioChunk {
     uint32_t sequence;
@@ -195,10 +225,6 @@ enum Button : uint64_t {
     // Not a libnx bit: the Switch app sends it for its "HOME do jogo" menu entry
     ButtonHome = 1ull << 40,
 };
-
-inline uint16_t ParityCount(uint16_t data_count) {
-    return data_count == 0 ? 0 : static_cast<uint16_t>((data_count + 4) / 5); // about 20%
-}
 
 inline size_t WriteHeader(uint8_t* out, Type type, uint64_t counter = 0) {
     Header header{};

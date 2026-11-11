@@ -5,6 +5,7 @@
 #include <cstring>
 
 #include "charis_stream/client.h"
+#include "charis_stream/fec.h"
 
 namespace CharisStream {
 
@@ -194,7 +195,15 @@ void Client::ResetStream() {
     loss_events.clear();
     current_bitrate = target_bitrate;
     applied_target = target_bitrate;
-    last_bitrate_change_ms = NowMs();
+    parity_percent = 20;
+    highest_counter = 0;
+    seen_window = 0;
+    window_start_counter = 0;
+    window_received = 0;
+    clean_seconds = 0;
+    last_decrease_ms = NowMs();
+    last_increase_ms = NowMs();
+    last_bitrate_sent_ms = 0;
 }
 
 void Client::Loop() {
@@ -306,32 +315,9 @@ void Client::Loop() {
                 last_keyframe_request_ms = now;
                 SendSealed(Type::RequestKeyframe, nullptr, 0);
             }
-            if (now - last_adapt_ms > 2000) {
+            if (now - last_adapt_ms >= 1000) {
                 last_adapt_ms = now;
-                while (!loss_events.empty() && now - loss_events.front() > 10000) {
-                    loss_events.pop_front();
-                }
-                const uint32_t target = target_bitrate;
-                uint32_t wanted = current_bitrate;
-                if (target != applied_target) {
-                    wanted = target; // the user picked another quality
-                    applied_target = target;
-                } else if (loss_events.size() >= 3 && now - last_bitrate_change_ms > 5000) {
-                    wanted = std::max(MinBitrate, current_bitrate * 7 / 10);
-                    loss_events.clear();
-                } else if (loss_events.empty() && current_bitrate < target &&
-                           now - last_bitrate_change_ms > 20000) {
-                    wanted = std::min(target, current_bitrate * 12 / 10);
-                }
-                if (wanted != current_bitrate) {
-                    current_bitrate = wanted;
-                    last_bitrate_change_ms = now;
-                    const SetBitrate request{wanted};
-                    SendSealed(Type::SetBitrate, reinterpret_cast<const uint8_t*>(&request),
-                               sizeof(request));
-                    std::scoped_lock lock{mutex};
-                    stats.bitrate_kbps = wanted;
-                }
+                Adapt(now);
             }
         }
 
@@ -428,8 +414,8 @@ void Client::HandleSealed(const uint8_t* packet, size_t size, const Header& head
         std::scoped_lock lock{send_mutex};
         open_key = keys.host_to_client;
     }
-    const long payload = Open(packet, size, open_key, plain);
-    if (payload < 0) {
+    const long payload = CharisStream::Open(packet, size, open_key, plain);
+    if (payload < 0 || !AcceptCounter(header.counter)) {
         return;
     }
     last_packet_ms = NowMs();
@@ -463,6 +449,90 @@ void Client::HandleSealed(const uint8_t* packet, size_t size, const Header& head
     }
 }
 
+// Packets come from two threads on the PC, so they can arrive a little out of order: remember
+// which of the last 64 counters were seen and refuse anything older or repeated.
+bool Client::AcceptCounter(uint64_t counter) {
+    if (counter > highest_counter) {
+        const uint64_t shift = counter - highest_counter;
+        seen_window = shift >= 64 ? 1 : (seen_window << shift) | 1;
+        if (highest_counter == 0) {
+            window_start_counter = counter - 1;
+        }
+        highest_counter = counter;
+        ++window_received;
+        return true;
+    }
+    const uint64_t age = highest_counter - counter;
+    if (age >= 64 || (seen_window & (uint64_t{1} << age)) != 0) {
+        return false;
+    }
+    seen_window |= uint64_t{1} << age;
+    ++window_received;
+    return true;
+}
+
+// Once a second: how many packets from the PC went missing? A few: more parity. Many, or
+// frames that could not be rebuilt: a lower rate too. A clean network for a while: back up.
+void Client::Adapt(int64_t now) {
+    const uint64_t expected = highest_counter - window_start_counter;
+    const float loss =
+        expected == 0 ? 0.0f
+                      : 1.0f - static_cast<float>(std::min(window_received, expected)) /
+                                   static_cast<float>(expected);
+    window_start_counter = highest_counter;
+    window_received = 0;
+    while (!loss_events.empty() && now - loss_events.front() > 5000) {
+        loss_events.pop_front();
+    }
+
+    const uint32_t target = target_bitrate;
+    uint32_t bitrate = current_bitrate;
+    uint32_t parity = parity_percent;
+    if (target != applied_target) {
+        bitrate = target; // the user picked another quality
+        applied_target = target;
+    }
+    if (loss >= 0.08f) {
+        parity = 60;
+    } else if (loss >= 0.03f) {
+        parity = std::max<uint32_t>(parity, 40);
+    } else if (loss >= 0.01f) {
+        parity = std::max<uint32_t>(parity, 30);
+    }
+    if (loss < 0.005f && loss_events.empty()) {
+        ++clean_seconds;
+    } else {
+        clean_seconds = 0;
+    }
+    if ((loss >= 0.05f || loss_events.size() >= 2) && now - last_decrease_ms >= 2000) {
+        bitrate = std::max(MinBitrate, bitrate * 3 / 4);
+        last_decrease_ms = now;
+        loss_events.clear();
+    } else if (clean_seconds >= 8 && now - last_increase_ms >= 8000) {
+        parity = std::max<uint32_t>(20, parity - 10);
+        if (bitrate < target) {
+            bitrate = std::min(target, bitrate * 115 / 100);
+        }
+        last_increase_ms = now;
+    }
+
+    const bool changed = bitrate != current_bitrate || parity != parity_percent;
+    current_bitrate = bitrate;
+    parity_percent = parity;
+    // Sent again now and then: a lost request must not leave the PC on old settings
+    if (changed || now - last_bitrate_sent_ms > 3000) {
+        last_bitrate_sent_ms = now;
+        SetBitrate request{};
+        request.bitrate_kbps = bitrate;
+        request.parity_percent = static_cast<uint8_t>(parity);
+        SendSealed(Type::SetBitrate, reinterpret_cast<const uint8_t*>(&request), sizeof(request));
+    }
+    std::scoped_lock lock{mutex};
+    stats.bitrate_kbps = bitrate;
+    stats.parity_percent = parity;
+    stats.loss_percent = loss * 100.0f;
+}
+
 void Client::NoteLoss() {
     {
         std::scoped_lock lock{mutex};
@@ -472,20 +542,36 @@ void Client::NoteLoss() {
 }
 
 void Client::HandleVideo(const uint8_t* body, size_t size) {
-    if (size < sizeof(VideoChunk)) {
+    if (size <= sizeof(VideoChunk)) {
         return;
     }
     VideoChunk chunk;
     std::memcpy(&chunk, body, sizeof(chunk));
     const uint8_t* piece = body + sizeof(chunk);
     const size_t bytes = size - sizeof(chunk);
-    const uint32_t total = uint32_t{chunk.data_count} + chunk.parity_count;
-    if (chunk.data_count == 0 || chunk.parity_count != ParityCount(chunk.data_count) ||
-        chunk.index >= total || bytes == 0 || bytes > ChunkBytes ||
-        chunk.frame_size > size_t{chunk.data_count} * ChunkBytes ||
-        chunk.frame_size <= size_t{chunk.data_count - 1u} * ChunkBytes) {
+    if (chunk.frame_size == 0 || chunk.frame_size > MaxFrameBytes) {
         return;
     }
+    const uint32_t pieces = PieceCount(chunk.frame_size);
+    const uint32_t block_count = BlockCount(pieces);
+    if (chunk.block_count != block_count || chunk.block >= block_count) {
+        return;
+    }
+    uint32_t first, count;
+    BlockRange(pieces, block_count, chunk.block, first, count);
+    const size_t length = BlockLength(chunk.frame_size, first, count);
+    if (chunk.data_count != count || chunk.parity_count == 0 ||
+        chunk.parity_count > Fec::MaxParity || chunk.shard >= count + chunk.parity_count) {
+        return;
+    }
+    const bool is_data = chunk.shard < count;
+    const size_t expected_bytes =
+        is_data ? std::min(length, size_t{chunk.frame_size} - size_t{first + chunk.shard} * ChunkBytes)
+                : length;
+    if (bytes != expected_bytes) {
+        return;
+    }
+
     if (got_first_frame && static_cast<int32_t>(chunk.frame - next_frame) < 0) {
         return; // a late piece of a frame already shown or given up on
     }
@@ -513,78 +599,85 @@ void Client::HandleVideo(const uint8_t* body, size_t size) {
         assemblies.erase(assemblies.begin());
     }
     Assembly& assembly = assemblies[chunk.frame];
-    if (assembly.data_count == 0) {
-        assembly.data_count = chunk.data_count;
-        assembly.parity_count = chunk.parity_count;
+    if (assembly.frame_size == 0) {
         assembly.frame_size = chunk.frame_size;
         assembly.keyframe = chunk.keyframe != 0;
-        assembly.missing = chunk.data_count;
-        assembly.data.assign(size_t{chunk.data_count} * ChunkBytes, 0);
-        assembly.parity.assign(size_t{chunk.parity_count} * ChunkBytes, 0);
-        assembly.have.assign(total, 0);
-    } else if (assembly.data_count != chunk.data_count ||
-               assembly.frame_size != chunk.frame_size) {
+        assembly.data.assign(size_t{pieces} * ChunkBytes, 0);
+        assembly.blocks.resize(block_count);
+        assembly.blocks_left = block_count;
+    } else if (assembly.frame_size != chunk.frame_size) {
         return;
     }
-    if (assembly.complete || assembly.have[chunk.index]) {
+    if (assembly.complete) {
         return;
     }
-    if (chunk.index < chunk.data_count) {
-        const size_t expected =
-            std::min(ChunkBytes, chunk.frame_size - size_t{chunk.index} * ChunkBytes);
-        if (bytes != expected) {
-            return;
-        }
-        std::memcpy(assembly.data.data() + size_t{chunk.index} * ChunkBytes, piece, bytes);
-        --assembly.missing;
+    Block& block = assembly.blocks[chunk.block];
+    if (block.have.empty()) {
+        block.first = first;
+        block.data_count = static_cast<uint8_t>(count);
+        block.parity_count = chunk.parity_count;
+        block.missing = static_cast<uint8_t>(count);
+        block.length = length;
+        block.have.assign(count + chunk.parity_count, 0);
+    } else if (block.parity_count != chunk.parity_count) {
+        return;
+    }
+    if (block.done || block.have[chunk.shard]) {
+        return;
+    }
+    block.have[chunk.shard] = 1;
+    if (is_data) {
+        std::memcpy(assembly.data.data() + size_t{first + chunk.shard} * ChunkBytes, piece, bytes);
+        --block.missing;
     } else {
-        std::memcpy(assembly.parity.data() + size_t{chunk.index - chunk.data_count} * ChunkBytes,
-                    piece, bytes);
+        if (block.parity.empty()) {
+            block.parity.assign(size_t{block.parity_count} * length, 0);
+        }
+        std::memcpy(block.parity.data() + size_t(chunk.shard - count) * length, piece, bytes);
+        ++block.parity_have;
     }
-    assembly.have[chunk.index] = 1;
 
-    if (assembly.missing > 0 && assembly.missing <= assembly.parity_count) {
-        Recover(assembly);
+    if (block.missing > 0 && block.parity_have >= block.missing) {
+        Recover(assembly, block);
     }
-    if (assembly.missing == 0) {
-        assembly.complete = true;
-        Deliver();
+    if (block.missing == 0) {
+        block.done = true;
+        block.parity.clear();
+        block.parity.shrink_to_fit();
+        if (--assembly.blocks_left == 0) {
+            assembly.complete = true;
+            Deliver();
+        }
     }
 }
 
-// A group with its parity piece and exactly one data piece missing: XOR gives it back.
-void Client::Recover(Assembly& assembly) {
-    for (uint16_t p = 0; p < assembly.parity_count && assembly.missing > 0; ++p) {
-        if (!assembly.have[assembly.data_count + p]) {
-            continue;
-        }
-        int hole = -1;
-        int holes = 0;
-        for (uint32_t i = p; i < assembly.data_count; i += assembly.parity_count) {
-            if (!assembly.have[i]) {
-                hole = static_cast<int>(i);
-                ++holes;
-            }
-        }
-        if (holes != 1) {
-            continue;
-        }
-        uint8_t* out = assembly.data.data() + size_t(hole) * ChunkBytes;
-        std::memcpy(out, assembly.parity.data() + size_t{p} * ChunkBytes, ChunkBytes);
-        for (uint32_t i = p; i < assembly.data_count; i += assembly.parity_count) {
-            if (static_cast<int>(i) == hole) {
-                continue;
-            }
-            const uint8_t* other = assembly.data.data() + size_t{i} * ChunkBytes;
-            for (size_t b = 0; b < ChunkBytes; ++b) {
-                out[b] ^= other[b];
-            }
-        }
-        assembly.have[hole] = 1;
-        --assembly.missing;
-        std::scoped_lock lock{mutex};
-        ++stats.rebuilt_pieces;
+void Client::Recover(Assembly& assembly, Block& block) {
+    uint8_t* data[Fec::MaxData];
+    bool data_present[Fec::MaxData];
+    const uint8_t* parity[Fec::MaxParity];
+    bool parity_present[Fec::MaxParity];
+    for (int i = 0; i < block.data_count; ++i) {
+        data[i] = assembly.data.data() + size_t{block.first + static_cast<uint32_t>(i)} * ChunkBytes;
+        data_present[i] = block.have[i] != 0;
     }
+    for (int p = 0; p < block.parity_count; ++p) {
+        parity[p] = block.parity.data() + size_t(p) * block.length;
+        parity_present[p] = block.have[block.data_count + p] != 0;
+    }
+    if (!Fec::Decode(data, data_present, block.data_count, parity, parity_present,
+                     block.parity_count, block.length)) {
+        return;
+    }
+    // The last piece of the frame may be shorter: what decoding wrote past the frame was the
+    // zero padding, and the buffer has room for whole pieces
+    {
+        std::scoped_lock lock{mutex};
+        stats.rebuilt_pieces += block.missing;
+    }
+    for (int i = 0; i < block.data_count; ++i) {
+        block.have[i] = 1;
+    }
+    block.missing = 0;
 }
 
 void Client::Deliver() {

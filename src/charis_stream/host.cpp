@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstring>
 
+#include "charis_stream/fec.h"
 #include "charis_stream/host.h"
 
 namespace CharisStream {
@@ -27,6 +28,7 @@ struct Host::Session {
     std::atomic<bool> active{true};
     std::atomic<bool> want_keyframe{true};
     std::atomic<int> pending_bitrate{0};
+    std::atomic<int> parity_percent{20};
     std::atomic<int64_t> last_seen_ms{0};
     uint64_t last_counter = 0; // highest counter accepted from the client (control thread only)
     std::thread video;
@@ -43,8 +45,7 @@ constexpr int PendingForMs = 10000;
 constexpr size_t MaxPending = 8;
 
 // Short waits that do not round up to a whole millisecond tick
-void PaceMicros(int micros) {
-    const auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(micros);
+void WaitUntil(std::chrono::steady_clock::time_point until) {
     while (std::chrono::steady_clock::now() < until) {
         std::this_thread::yield();
     }
@@ -131,6 +132,7 @@ void Host::ControlLoop() {
     bool stun_resolved = false;
     int64_t last_stun_ms = 0;
     int64_t last_punch_ms = 0;
+    int64_t last_keepalive_ms = 0;
 
     while (running) {
         const int64_t now = NowMs();
@@ -187,6 +189,11 @@ void Host::ControlLoop() {
             }
             if (current && now - current->last_seen_ms > TimeoutMs) {
                 EndSession(false);
+            } else if (current && now - last_keepalive_ms > KeepaliveMs) {
+                // Lets the Switch know the PC is there even while the picture does not change
+                last_keepalive_ms = now;
+                uint8_t scratch[SealOverhead + 4];
+                SendSealed(*current, Type::Keepalive, nullptr, 0, scratch);
             }
         }
 
@@ -336,6 +343,7 @@ void Host::HandleSealed(const uint8_t* packet, size_t size, const Header& header
             std::memcpy(&request, plain, sizeof(request));
             current->pending_bitrate =
                 static_cast<int>(std::clamp<uint32_t>(request.bitrate_kbps, 1500, 60000));
+            current->parity_percent = std::clamp<int>(request.parity_percent, 10, 100);
         }
         break;
     case Type::Stop:
@@ -430,17 +438,17 @@ void Host::VideoLoop(std::shared_ptr<Session> current) {
     std::vector<uint8_t> frame;
     std::vector<uint8_t> plain(sizeof(VideoChunk) + ChunkBytes);
     std::vector<uint8_t> sealed(plain.size() + SealOverhead);
+    std::vector<uint8_t> parity(size_t{Fec::MaxParity} * ChunkBytes);
     uint32_t frame_number = 0;
     int64_t last_keyframe_ms = 0;
+    const int64_t frame_interval_us = 1000000 / current->settings.fps;
 
+    int applied_bitrate = static_cast<int>(current->settings.bitrate_kbps);
     while (current->active) {
-        if (const int bitrate = current->pending_bitrate.exchange(0); bitrate > 0) {
-            source->SetBitrate(bitrate);
-        }
-        // A full frame is big: at most two a second, however often the Switch asks
+        // A full frame is big: at most four a second, however often the Switch asks
         bool want_keyframe = false;
         const int64_t now = NowMs();
-        if (current->want_keyframe && now - last_keyframe_ms > 500) {
+        if (current->want_keyframe && now - last_keyframe_ms > 250) {
             current->want_keyframe = false;
             want_keyframe = true;
             last_keyframe_ms = now;
@@ -452,53 +460,80 @@ void Host::VideoLoop(std::shared_ptr<Session> current) {
             }
             break;
         }
-        if (frame.empty() || frame.size() > ChunkBytes * 60000) {
+        if (frame.empty() || frame.size() > MaxFrameBytes) {
             continue;
         }
-
-        VideoChunk chunk{};
-        chunk.frame = frame_number++;
-        chunk.data_count = static_cast<uint16_t>((frame.size() + ChunkBytes - 1) / ChunkBytes);
-        chunk.parity_count = ParityCount(chunk.data_count);
-        chunk.frame_size = static_cast<uint32_t>(frame.size());
-        chunk.keyframe = keyframe ? 1 : 0;
-        const auto piece_size = [&](uint16_t index) {
-            return std::min(ChunkBytes, frame.size() - static_cast<size_t>(index) * ChunkBytes);
-        };
-        int sent = 0;
-        const auto send = [&](size_t bytes) {
-            std::memcpy(plain.data(), &chunk, sizeof(chunk));
-            SendSealed(*current, Type::Video, plain.data(), sizeof(chunk) + bytes, sealed.data());
-            // Spread big frames a little so routers and the Switch's Wi-Fi keep up
-            if (++sent % 16 == 0) {
-                PaceMicros(250);
-            }
-        };
-
-        for (uint16_t i = 0; i < chunk.data_count && current->active; ++i) {
-            chunk.index = i;
-            const size_t bytes = piece_size(i);
-            std::memcpy(plain.data() + sizeof(chunk), frame.data() + size_t{i} * ChunkBytes,
-                        bytes);
-            send(bytes);
-        }
-        for (uint16_t p = 0; p < chunk.parity_count && current->active; ++p) {
-            uint8_t* parity = plain.data() + sizeof(chunk);
-            std::memset(parity, 0, ChunkBytes);
-            size_t longest = 0;
-            for (uint32_t i = p; i < chunk.data_count; i += chunk.parity_count) {
-                const size_t bytes = piece_size(static_cast<uint16_t>(i));
-                const uint8_t* piece = frame.data() + size_t{i} * ChunkBytes;
-                for (size_t b = 0; b < bytes; ++b) {
-                    parity[b] ^= piece[b];
-                }
-                longest = std::max(longest, bytes);
-            }
-            chunk.index = static_cast<uint16_t>(chunk.data_count + p);
-            send(longest);
+        SendFrame(*current, frame, frame_number++, keyframe, frame_interval_us, plain, sealed,
+                  parity);
+        if (const int bitrate = current->pending_bitrate.exchange(0); bitrate > 0 &&
+                                                                      bitrate != applied_bitrate) {
+            applied_bitrate = bitrate;
+            source->SetBitrate(bitrate);
         }
     }
     source->Close();
+}
+
+void Host::SendFrame(Session& current, std::vector<uint8_t>& frame, uint32_t number, bool keyframe,
+                     int64_t frame_interval_us, std::vector<uint8_t>& plain,
+                     std::vector<uint8_t>& sealed, std::vector<uint8_t>& parity) {
+    const uint32_t frame_size = static_cast<uint32_t>(frame.size());
+    const uint32_t pieces = PieceCount(frame_size);
+    const uint32_t blocks = BlockCount(pieces);
+    const int percent = current.parity_percent;
+    // The last piece is zero padded so parity can be computed over whole pieces
+    frame.resize(size_t{pieces} * ChunkBytes, 0);
+
+    uint32_t total = 0;
+    for (uint32_t b = 0; b < blocks; ++b) {
+        uint32_t first, count;
+        BlockRange(pieces, blocks, b, first, count);
+        total += count + ParityFor(count, static_cast<uint32_t>(percent));
+    }
+    // Spread the frame over part of the time until the next one, so the router and the
+    // Switch's Wi-Fi get a steady flow instead of a burst they would drop pieces of
+    const int64_t spread_us = frame_interval_us * (keyframe ? 5 : 3) / 10;
+    const auto gap = std::chrono::microseconds(std::min<int64_t>(150, spread_us / total));
+    auto next_send = std::chrono::steady_clock::now();
+
+    VideoChunk chunk{};
+    chunk.frame = number;
+    chunk.frame_size = frame_size;
+    chunk.block_count = static_cast<uint8_t>(blocks);
+    chunk.keyframe = keyframe ? 1 : 0;
+    const auto send = [&](const uint8_t* piece, size_t bytes) {
+        WaitUntil(next_send);
+        std::memcpy(plain.data(), &chunk, sizeof(chunk));
+        std::memcpy(plain.data() + sizeof(chunk), piece, bytes);
+        SendSealed(current, Type::Video, plain.data(), sizeof(chunk) + bytes, sealed.data());
+        next_send += gap;
+    };
+
+    for (uint32_t b = 0; b < blocks && current.active; ++b) {
+        uint32_t first, count;
+        BlockRange(pieces, blocks, b, first, count);
+        const size_t length = BlockLength(frame_size, first, count);
+        chunk.block = static_cast<uint8_t>(b);
+        chunk.data_count = static_cast<uint8_t>(count);
+        chunk.parity_count = ParityFor(count, static_cast<uint32_t>(percent));
+        const uint8_t* data[Fec::MaxData];
+        for (uint32_t i = 0; i < count; ++i) {
+            data[i] = frame.data() + size_t{first + i} * ChunkBytes;
+            chunk.shard = static_cast<uint8_t>(i);
+            const size_t bytes =
+                std::min(length, size_t{frame_size} - size_t{first + i} * ChunkBytes);
+            send(data[i], bytes);
+        }
+        uint8_t* out[Fec::MaxParity];
+        for (int p = 0; p < chunk.parity_count; ++p) {
+            out[p] = parity.data() + size_t(p) * ChunkBytes;
+        }
+        Fec::Encode(data, static_cast<int>(count), out, chunk.parity_count, length);
+        for (int p = 0; p < chunk.parity_count && current.active; ++p) {
+            chunk.shard = static_cast<uint8_t>(count + static_cast<uint32_t>(p));
+            send(out[p], length);
+        }
+    }
 }
 
 void Host::AudioLoop(std::shared_ptr<Session> current) {
