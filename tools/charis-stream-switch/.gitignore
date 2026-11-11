@@ -1,0 +1,5 @@
+# Build outputs of the Switch app
+/build/
+*.elf
+*.nacp
+*.nro
