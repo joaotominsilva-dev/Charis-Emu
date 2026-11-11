@@ -3,8 +3,8 @@
 
 #pragma once
 
+#include <array>
 #include <atomic>
-#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -13,6 +13,8 @@
 #include <thread>
 #include <vector>
 
+#include "charis_stream/crypto.h"
+#include "charis_stream/net.h"
 #include "charis_stream/protocol.h"
 
 namespace CharisStream {
@@ -24,6 +26,7 @@ public:
     virtual bool Open(int width, int height, int fps, int bitrate_kbps, std::string& error) = 0;
     // Waits for the next frame. Returns false when the source failed.
     virtual bool Next(std::vector<uint8_t>& frame, bool& keyframe, bool want_keyframe) = 0;
+    virtual void SetBitrate(int /*bitrate_kbps*/) {}
     virtual void Close() = 0;
 };
 
@@ -37,20 +40,26 @@ public:
     virtual void Close() = 0;
 };
 
+struct HostConfig {
+    std::string name;                 // shown on the Switch
+    Key32 key{};                      // the account's stream key
+    std::array<uint8_t, 8> host_id{}; // stable id of this PC
+    uint16_t port = HostPort;
+};
+
 struct HostCallbacks {
     std::function<std::unique_ptr<VideoSource>()> make_video;
     std::function<std::unique_ptr<AudioSource>()> make_audio;
-    // Called on the network thread
+    // All called on the host's own threads
     std::function<void(const InputState&)> on_input;
-    std::function<void(bool connected, const std::string& client)> on_session;
+    std::function<void(bool connected, const std::string& client_name)> on_session;
     std::function<void(const std::string& message)> on_error;
-    // Requests from the Switch app such as Type::GoHome, on the network thread
-    std::function<void(Type command)> on_command;
+    std::function<void(Type command)> on_command; // Type::GoHome
 };
 
 class Host {
 public:
-    Host(std::string name, HostCallbacks callbacks);
+    Host(HostConfig config, HostCallbacks callbacks);
     ~Host();
 
     bool Start(std::string& error);
@@ -59,24 +68,42 @@ public:
         return session_active;
     }
 
+    // Where a Switch can reach this PC: on the home network, and from the internet (the latter
+    // is known a moment after Start, once a STUN server answered; not valid until then).
+    std::vector<Address> LocalAddresses() const;
+    Address PublicAddress() const;
+    // A Switch asked to connect from these addresses: send to them for a while so this PC's
+    // router lets its packets in.
+    void Punch(const std::vector<Address>& targets);
+
 private:
     struct Session;
+    struct Pending;
 
     void ControlLoop();
-    void BeginSession(const void* address, int address_size, const StartRequest& request);
+    void HandleClear(const Header& header, const uint8_t* body, long size, const Address& from);
+    void HandleSealed(const uint8_t* packet, size_t size, const Header& header,
+                      const Address& from);
+    void BeginSession(const Pending& pending, const StartRequest& request);
     void EndSession(bool notify_client);
     void VideoLoop(std::shared_ptr<Session> session);
     void AudioLoop(std::shared_ptr<Session> session);
-    void SendTo(const std::shared_ptr<Session>& session, const uint8_t* data, size_t size);
+    void SendSealed(Session& session, Type type, const uint8_t* payload, size_t size,
+                    uint8_t* scratch);
 
-    std::string name;
+    HostConfig config;
+    Tag16 tag{};
     HostCallbacks callbacks;
-    intptr_t socket_fd = -1;
+    UdpSocket socket;
     std::thread control_thread;
     std::atomic<bool> running{false};
     std::atomic<bool> session_active{false};
-    std::mutex session_mutex;
+
+    mutable std::mutex mutex; // session, pending, public_address, punch_targets
     std::shared_ptr<Session> session;
+    std::vector<Pending> pending;
+    Address public_address;
+    std::vector<std::pair<Address, int64_t>> punch_targets; // address, stop sending at
 };
 
 } // namespace CharisStream

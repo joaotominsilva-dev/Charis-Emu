@@ -2,65 +2,58 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
-
-#ifdef _WIN32
-#include <winsock2.h>
-#include <ws2tcpip.h>
-using socklen_type = int;
-#define CLOSE_SOCKET closesocket
-#else
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <poll.h>
-#include <sys/socket.h>
-#include <unistd.h>
-using socklen_type = socklen_t;
-#define CLOSE_SOCKET close
-#endif
 
 #include "charis_stream/host.h"
 
 namespace CharisStream {
 
+struct Host::Pending {
+    Address client;
+    uint8_t client_nonce[16]{};
+    uint8_t host_nonce[16]{};
+    SessionKeys keys;
+    std::string name;
+    int64_t created_ms = 0;
+};
+
 struct Host::Session {
-    sockaddr_in client{};
+    Address client;
+    SessionKeys keys;
+    std::string name;
     StartRequest settings{};
+    std::atomic<uint64_t> send_counter{1};
     std::atomic<bool> active{true};
     std::atomic<bool> want_keyframe{true};
+    std::atomic<int> pending_bitrate{0};
     std::atomic<int64_t> last_seen_ms{0};
+    uint64_t last_counter = 0; // highest counter accepted from the client (control thread only)
     std::thread video;
     std::thread audio;
 };
 
 namespace {
 
-int64_t NowMs() {
-    return std::chrono::duration_cast<std::chrono::milliseconds>(
-               std::chrono::steady_clock::now().time_since_epoch())
-        .count();
-}
+constexpr int StunRetryMs = 3000;
+constexpr int StunRefreshMs = 20000; // keeps the router's mapping alive
+constexpr int PunchForMs = 12000;
+constexpr int PunchEveryMs = 200;
+constexpr int PendingForMs = 10000;
+constexpr size_t MaxPending = 8;
 
-std::string AddressText(const sockaddr_in& address) {
-    char text[INET_ADDRSTRLEN] = {};
-    inet_ntop(AF_INET, &address.sin_addr, text, sizeof(text));
-    return text;
-}
-
-bool WaitReadable(intptr_t fd, int timeout_ms) {
-#ifdef _WIN32
-    WSAPOLLFD pfd{static_cast<SOCKET>(fd), POLLRDNORM, 0};
-    return WSAPoll(&pfd, 1, timeout_ms) > 0;
-#else
-    pollfd pfd{static_cast<int>(fd), POLLIN, 0};
-    return poll(&pfd, 1, timeout_ms) > 0;
-#endif
+// Short waits that do not round up to a whole millisecond tick
+void PaceMicros(int micros) {
+    const auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(micros);
+    while (std::chrono::steady_clock::now() < until) {
+        std::this_thread::yield();
+    }
 }
 
 } // namespace
 
-Host::Host(std::string name_, HostCallbacks callbacks_)
-    : name{std::move(name_)}, callbacks{std::move(callbacks_)} {}
+Host::Host(HostConfig config_, HostCallbacks callbacks_)
+    : config{std::move(config_)}, tag{TagFromKey(config.key)}, callbacks{std::move(callbacks_)} {}
 
 Host::~Host() {
     Stop();
@@ -70,31 +63,11 @@ bool Host::Start(std::string& error) {
     if (running) {
         return true;
     }
-#ifdef _WIN32
-    WSADATA wsa;
-    WSAStartup(MAKEWORD(2, 2), &wsa);
-#endif
-    const auto fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (fd < 0) {
-        error = "Não foi possível abrir a conexão de rede.";
+    if (!socket.Open(config.port, error)) {
+        error = "A porta " + std::to_string(config.port) +
+                " já está em uso. Feche outro Charis Switch aberto e tente de novo.";
         return false;
     }
-    const int yes = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&yes), sizeof(yes));
-    setsockopt(fd, SOL_SOCKET, SO_BROADCAST, reinterpret_cast<const char*>(&yes), sizeof(yes));
-    const int buffer = 4 * 1024 * 1024;
-    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<const char*>(&buffer), sizeof(buffer));
-
-    sockaddr_in address{};
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = htonl(INADDR_ANY);
-    address.sin_port = htons(HostPort);
-    if (bind(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
-        CLOSE_SOCKET(fd);
-        error = "A porta 48010 já está em uso. Feche outro programa de transmissão e tente de novo.";
-        return false;
-    }
-    socket_fd = static_cast<intptr_t>(fd);
     running = true;
     control_thread = std::thread([this] { ControlLoop(); });
     return true;
@@ -109,154 +82,315 @@ void Host::Stop() {
     if (control_thread.joinable()) {
         control_thread.join();
     }
-    CLOSE_SOCKET(socket_fd);
-    socket_fd = -1;
+    socket.Close();
 }
 
-void Host::SendTo(const std::shared_ptr<Session>& target, const uint8_t* data, size_t size) {
-    sendto(socket_fd, reinterpret_cast<const char*>(data), static_cast<int>(size), 0,
-           reinterpret_cast<const sockaddr*>(&target->client), sizeof(target->client));
+std::vector<Address> Host::LocalAddresses() const {
+    std::vector<Address> out;
+    Address local;
+    local.ip = PrimaryLocalIp();
+    local.port = socket.Port();
+    if (local.Valid()) {
+        out.push_back(local);
+    }
+    return out;
+}
+
+Address Host::PublicAddress() const {
+    std::scoped_lock lock{mutex};
+    return public_address;
+}
+
+void Host::Punch(const std::vector<Address>& targets) {
+    const int64_t until = NowMs() + PunchForMs;
+    std::scoped_lock lock{mutex};
+    for (const Address& target : targets) {
+        if (!target.Valid()) {
+            continue;
+        }
+        const auto it = std::find_if(punch_targets.begin(), punch_targets.end(),
+                                     [&](const auto& entry) { return entry.first == target; });
+        if (it != punch_targets.end()) {
+            it->second = until;
+        } else if (punch_targets.size() < 32) {
+            punch_targets.emplace_back(target, until);
+        }
+    }
+}
+
+void Host::SendSealed(Session& target, Type type, const uint8_t* payload, size_t size,
+                      uint8_t* scratch) {
+    const size_t total = Seal(scratch, type, target.send_counter.fetch_add(1),
+                              target.keys.host_to_client, payload, size);
+    socket.SendTo(target.client, scratch, total);
 }
 
 void Host::ControlLoop() {
     std::vector<uint8_t> buffer(2048);
+    std::vector<Address> stun_servers;
+    bool stun_resolved = false;
+    int64_t last_stun_ms = 0;
+    int64_t last_punch_ms = 0;
+
     while (running) {
+        const int64_t now = NowMs();
+
+        // Ask a STUN server which address the router gives this socket, and keep asking so the
+        // router does not forget it.
+        Address known_public;
+        {
+            std::scoped_lock lock{mutex};
+            known_public = public_address;
+        }
+        if (now - last_stun_ms > (known_public.Valid() ? StunRefreshMs : StunRetryMs)) {
+            last_stun_ms = now;
+            if (!stun_resolved) {
+                for (const StunServer& server : StunServers) {
+                    Address address;
+                    if (ResolveHost(server.host, address.ip)) {
+                        address.port = server.port;
+                        stun_servers.push_back(address);
+                    }
+                }
+                stun_resolved = !stun_servers.empty();
+            }
+            uint8_t request[StunRequestSize];
+            for (const Address& server : stun_servers) {
+                BuildStunRequest(request);
+                socket.SendTo(server, request, sizeof(request));
+            }
+        }
+
+        if (now - last_punch_ms > PunchEveryMs) {
+            last_punch_ms = now;
+            uint8_t packet[sizeof(Header)];
+            WriteHeader(packet, Type::Punch);
+            std::scoped_lock lock{mutex};
+            punch_targets.erase(std::remove_if(punch_targets.begin(), punch_targets.end(),
+                                               [&](const auto& e) { return e.second < now; }),
+                                punch_targets.end());
+            for (const auto& entry : punch_targets) {
+                socket.SendTo(entry.first, packet, sizeof(packet));
+            }
+            pending.erase(std::remove_if(pending.begin(), pending.end(),
+                                         [&](const Pending& p) {
+                                             return now - p.created_ms > PendingForMs;
+                                         }),
+                          pending.end());
+        }
+
         {
             std::shared_ptr<Session> current;
             {
-                std::scoped_lock lock{session_mutex};
+                std::scoped_lock lock{mutex};
                 current = session;
             }
-            if (current && NowMs() - current->last_seen_ms > TimeoutMs) {
+            if (current && now - current->last_seen_ms > TimeoutMs) {
                 EndSession(false);
             }
         }
-        if (!WaitReadable(socket_fd, 200)) {
-            continue;
-        }
-        sockaddr_in from{};
-        socklen_type from_size = sizeof(from);
-        const auto received =
-            recvfrom(socket_fd, reinterpret_cast<char*>(buffer.data()),
-                     static_cast<int>(buffer.size()), 0, reinterpret_cast<sockaddr*>(&from),
-                     &from_size);
+
+        Address from;
+        const long received = socket.ReceiveFrom(buffer.data(), buffer.size(), from, 50);
         if (received <= 0) {
             continue;
         }
-        Type type;
-        const long payload = ReadHeader(buffer.data(), static_cast<size_t>(received), type);
+        const size_t size = static_cast<size_t>(received);
+        if (IsStunPacket(buffer.data(), size)) {
+            Address mapped;
+            if (ParseStunResponse(buffer.data(), size, mapped)) {
+                std::scoped_lock lock{mutex};
+                public_address = mapped;
+            }
+            continue;
+        }
+        Header header;
+        const long payload = ReadHeader(buffer.data(), size, header);
         if (payload < 0) {
             continue;
         }
-        const uint8_t* body = buffer.data() + sizeof(Header);
-
-        std::shared_ptr<Session> current;
-        {
-            std::scoped_lock lock{session_mutex};
-            current = session;
-        }
-        const bool from_client = current && current->client.sin_addr.s_addr == from.sin_addr.s_addr;
-
-        switch (type) {
-        case Type::Discover: {
-            uint8_t reply[sizeof(Header) + sizeof(Announce)] = {};
-            const size_t offset = WriteHeader(reply, Type::Announce);
-            Announce announce{};
-            std::strncpy(announce.name, name.c_str(), sizeof(announce.name) - 1);
-            announce.width = 1920;
-            announce.height = 1080;
-            std::memcpy(reply + offset, &announce, sizeof(announce));
-            sendto(socket_fd, reinterpret_cast<const char*>(reply), sizeof(reply), 0,
-                   reinterpret_cast<const sockaddr*>(&from), from_size);
-            break;
-        }
-        case Type::Start:
-            if (payload >= static_cast<long>(sizeof(StartRequest))) {
-                StartRequest request;
-                std::memcpy(&request, body, sizeof(request));
-                BeginSession(&from, static_cast<int>(from_size), request);
-            }
-            break;
-        case Type::Keepalive:
-            if (from_client) {
-                current->last_seen_ms = NowMs();
-            }
-            break;
-        case Type::RequestKeyframe:
-            if (from_client) {
-                current->want_keyframe = true;
-            }
-            break;
-        case Type::Stop:
-            if (from_client) {
-                EndSession(false);
-            }
-            break;
-        case Type::GoHome:
-            if (from_client && callbacks.on_command) {
-                current->last_seen_ms = NowMs();
-                callbacks.on_command(type);
-            }
-            break;
-        case Type::Input:
-            if (from_client && payload >= static_cast<long>(sizeof(InputState))) {
-                current->last_seen_ms = NowMs();
-                InputState state;
-                std::memcpy(&state, body, sizeof(state));
-                if (callbacks.on_input) {
-                    callbacks.on_input(state);
-                }
-            }
-            break;
-        default:
-            break;
+        if (IsEncrypted(header.type)) {
+            HandleSealed(buffer.data(), size, header, from);
+        } else {
+            HandleClear(header, buffer.data() + sizeof(Header), payload, from);
         }
     }
 }
 
-void Host::BeginSession(const void* address, int address_size, const StartRequest& request) {
-    sockaddr_in client{};
-    std::memcpy(&client, address, std::min<size_t>(sizeof(client), static_cast<size_t>(address_size)));
-    {
-        std::shared_ptr<Session> current;
-        {
-            std::scoped_lock lock{session_mutex};
-            current = session;
+void Host::HandleClear(const Header& header, const uint8_t* body, long size,
+                       const Address& from) {
+    if (header.type == Type::Discover && size >= static_cast<long>(sizeof(Discover))) {
+        Discover discover;
+        std::memcpy(&discover, body, sizeof(discover));
+        if (!EqualConstantTime(discover.tag, tag.data(), tag.size())) {
+            return; // another account
         }
-        // The same Switch asking again (it restarted): keep the running session
-        if (current && current->client.sin_addr.s_addr == client.sin_addr.s_addr &&
-            current->client.sin_port == client.sin_port) {
-            current->last_seen_ms = NowMs();
-            current->want_keyframe = true;
-            return;
-        }
+        uint8_t reply[sizeof(Header) + sizeof(Announce)];
+        const size_t offset = WriteHeader(reply, Type::Announce);
+        Announce announce{};
+        std::memcpy(announce.tag, tag.data(), tag.size());
+        std::memcpy(announce.host_id, config.host_id.data(), config.host_id.size());
+        std::strncpy(announce.name, config.name.c_str(), sizeof(announce.name) - 1);
+        std::memcpy(reply + offset, &announce, sizeof(announce));
+        socket.SendTo(from, reply, sizeof(reply));
+        return;
     }
+    if (header.type != Type::Hello || size < static_cast<long>(sizeof(Hello))) {
+        return;
+    }
+    Hello hello;
+    std::memcpy(&hello, body, sizeof(hello));
+    const Tag16 expected = HelloProof(config.key, hello.client_nonce);
+    if (!EqualConstantTime(hello.tag, tag.data(), tag.size()) ||
+        !EqualConstantTime(hello.proof, expected.data(), expected.size())) {
+        return;
+    }
+
+    Welcome welcome{};
+    {
+        std::scoped_lock lock{mutex};
+        auto it = std::find_if(pending.begin(), pending.end(), [&](const Pending& p) {
+            return p.client == from && std::memcmp(p.client_nonce, hello.client_nonce, 16) == 0;
+        });
+        if (it == pending.end()) {
+            if (pending.size() >= MaxPending) {
+                pending.erase(pending.begin());
+            }
+            Pending fresh;
+            fresh.client = from;
+            std::memcpy(fresh.client_nonce, hello.client_nonce, 16);
+            RandomBytes(fresh.host_nonce, 16);
+            fresh.keys = DeriveSessionKeys(config.key, fresh.client_nonce, fresh.host_nonce);
+            hello.name[sizeof(hello.name) - 1] = 0;
+            fresh.name = hello.name;
+            fresh.created_ms = NowMs();
+            pending.push_back(fresh);
+            it = pending.end() - 1;
+        }
+        std::memcpy(welcome.client_nonce, it->client_nonce, 16);
+        std::memcpy(welcome.host_nonce, it->host_nonce, 16);
+    }
+    const Tag16 proof = WelcomeProof(config.key, welcome.client_nonce, welcome.host_nonce);
+    std::memcpy(welcome.proof, proof.data(), proof.size());
+    uint8_t reply[sizeof(Header) + sizeof(Welcome)];
+    const size_t offset = WriteHeader(reply, Type::Welcome);
+    std::memcpy(reply + offset, &welcome, sizeof(welcome));
+    socket.SendTo(from, reply, sizeof(reply));
+}
+
+void Host::HandleSealed(const uint8_t* packet, size_t size, const Header& header,
+                        const Address& from) {
+    uint8_t plain[2048];
+    if (size > sizeof(plain)) {
+        return;
+    }
+    std::shared_ptr<Session> current;
+    {
+        std::scoped_lock lock{mutex};
+        current = session;
+    }
+
+    long payload = -1;
+    if (current && current->client == from) {
+        payload = Open(packet, size, current->keys.client_to_host, plain);
+    }
+    if (payload < 0) {
+        // Not the running session: the first packet of a new one that finished the handshake?
+        Pending match;
+        bool found = false;
+        {
+            std::scoped_lock lock{mutex};
+            for (const Pending& candidate : pending) {
+                if (candidate.client == from &&
+                    Open(packet, size, candidate.keys.client_to_host, plain) >=
+                        static_cast<long>(sizeof(StartRequest)) &&
+                    header.type == Type::Start) {
+                    match = candidate;
+                    found = true;
+                    break;
+                }
+            }
+        }
+        if (found) {
+            StartRequest request;
+            std::memcpy(&request, plain, sizeof(request));
+            BeginSession(match, request);
+        }
+        return;
+    }
+
+    // Each packet is accepted once and never an older one, so nothing can be replayed
+    if (header.counter <= current->last_counter) {
+        return;
+    }
+    current->last_counter = header.counter;
+    current->last_seen_ms = NowMs();
+
+    switch (header.type) {
+    case Type::RequestKeyframe:
+        current->want_keyframe = true;
+        break;
+    case Type::SetBitrate:
+        if (payload >= static_cast<long>(sizeof(SetBitrate))) {
+            SetBitrate request;
+            std::memcpy(&request, plain, sizeof(request));
+            current->pending_bitrate =
+                static_cast<int>(std::clamp<uint32_t>(request.bitrate_kbps, 1500, 60000));
+        }
+        break;
+    case Type::Stop:
+        EndSession(false);
+        break;
+    case Type::GoHome:
+        if (callbacks.on_command) {
+            callbacks.on_command(header.type);
+        }
+        break;
+    case Type::Input:
+        if (payload >= static_cast<long>(sizeof(InputState)) && callbacks.on_input) {
+            InputState state;
+            std::memcpy(&state, plain, sizeof(state));
+            callbacks.on_input(state);
+        }
+        break;
+    default: // Start again (it is repeated until video arrives) and Keepalive
+        break;
+    }
+}
+
+void Host::BeginSession(const Pending& accepted, const StartRequest& request) {
     EndSession(true);
 
     auto next = std::make_shared<Session>();
-    next->client = client;
+    next->client = accepted.client;
+    next->keys = accepted.keys;
+    next->name = accepted.name.empty() ? "Switch" : accepted.name;
     next->settings = request;
     next->settings.width = std::clamp<uint16_t>(request.width, 640, 1920);
     next->settings.height = std::clamp<uint16_t>(request.height, 360, 1080);
     next->settings.fps = std::clamp<uint16_t>(request.fps, 30, 60);
-    next->settings.bitrate_kbps = std::clamp<uint32_t>(request.bitrate_kbps, 2000, 60000);
+    next->settings.bitrate_kbps = std::clamp<uint32_t>(request.bitrate_kbps, 1500, 60000);
     next->last_seen_ms = NowMs();
     {
-        std::scoped_lock lock{session_mutex};
+        std::scoped_lock lock{mutex};
         session = next;
+        pending.erase(std::remove_if(pending.begin(), pending.end(),
+                                     [&](const Pending& p) { return p.client == next->client; }),
+                      pending.end());
+        punch_targets.clear();
     }
     session_active = true;
     next->video = std::thread([this, next] { VideoLoop(next); });
     next->audio = std::thread([this, next] { AudioLoop(next); });
     if (callbacks.on_session) {
-        callbacks.on_session(true, AddressText(client));
+        callbacks.on_session(true, next->name);
     }
 }
 
 void Host::EndSession(bool notify_client) {
     std::shared_ptr<Session> ending;
     {
-        std::scoped_lock lock{session_mutex};
+        std::scoped_lock lock{mutex};
         ending = std::move(session);
         session.reset();
     }
@@ -265,9 +399,10 @@ void Host::EndSession(bool notify_client) {
     }
     ending->active = false;
     if (notify_client) {
-        uint8_t packet[sizeof(Header)];
-        WriteHeader(packet, Type::Stop);
-        SendTo(ending, packet, sizeof(packet));
+        uint8_t scratch[SealOverhead + 4];
+        for (int i = 0; i < 3; ++i) {
+            SendSealed(*ending, Type::Stop, nullptr, 0, scratch);
+        }
     }
     if (ending->video.joinable()) {
         ending->video.join();
@@ -277,7 +412,7 @@ void Host::EndSession(bool notify_client) {
     }
     session_active = false;
     if (callbacks.on_session) {
-        callbacks.on_session(false, AddressText(ending->client));
+        callbacks.on_session(false, ending->name);
     }
 }
 
@@ -293,40 +428,75 @@ void Host::VideoLoop(std::shared_ptr<Session> current) {
         return;
     }
     std::vector<uint8_t> frame;
-    std::vector<uint8_t> packet(sizeof(Header) + sizeof(VideoChunk) + MaxVideoBytes);
+    std::vector<uint8_t> plain(sizeof(VideoChunk) + ChunkBytes);
+    std::vector<uint8_t> sealed(plain.size() + SealOverhead);
     uint32_t frame_number = 0;
+    int64_t last_keyframe_ms = 0;
+
     while (current->active) {
+        if (const int bitrate = current->pending_bitrate.exchange(0); bitrate > 0) {
+            source->SetBitrate(bitrate);
+        }
+        // A full frame is big: at most two a second, however often the Switch asks
+        bool want_keyframe = false;
+        const int64_t now = NowMs();
+        if (current->want_keyframe && now - last_keyframe_ms > 500) {
+            current->want_keyframe = false;
+            want_keyframe = true;
+            last_keyframe_ms = now;
+        }
         bool keyframe = false;
-        if (!source->Next(frame, keyframe, current->want_keyframe.exchange(false))) {
+        if (!source->Next(frame, keyframe, want_keyframe)) {
             if (callbacks.on_error) {
                 callbacks.on_error("A captura de vídeo parou.");
             }
             break;
         }
-        if (frame.empty()) {
+        if (frame.empty() || frame.size() > ChunkBytes * 60000) {
             continue;
         }
-        const uint16_t count =
-            static_cast<uint16_t>((frame.size() + MaxVideoBytes - 1) / MaxVideoBytes);
-        for (uint16_t index = 0; index < count && current->active; ++index) {
-            const size_t offset = WriteHeader(packet.data(), Type::Video);
-            VideoChunk chunk{};
-            chunk.frame = frame_number;
-            chunk.index = index;
-            chunk.count = count;
-            chunk.frame_size = static_cast<uint32_t>(frame.size());
-            chunk.keyframe = keyframe ? 1 : 0;
-            std::memcpy(packet.data() + offset, &chunk, sizeof(chunk));
-            const size_t start = static_cast<size_t>(index) * MaxVideoBytes;
-            const size_t bytes = std::min(MaxVideoBytes, frame.size() - start);
-            std::memcpy(packet.data() + offset + sizeof(chunk), frame.data() + start, bytes);
-            SendTo(current, packet.data(), offset + sizeof(chunk) + bytes);
-            // Spread big keyframes a little so the Switch's Wi-Fi buffer keeps up
-            if (count > 48 && index % 24 == 23) {
-                std::this_thread::sleep_for(std::chrono::microseconds(300));
+
+        VideoChunk chunk{};
+        chunk.frame = frame_number++;
+        chunk.data_count = static_cast<uint16_t>((frame.size() + ChunkBytes - 1) / ChunkBytes);
+        chunk.parity_count = ParityCount(chunk.data_count);
+        chunk.frame_size = static_cast<uint32_t>(frame.size());
+        chunk.keyframe = keyframe ? 1 : 0;
+        const auto piece_size = [&](uint16_t index) {
+            return std::min(ChunkBytes, frame.size() - static_cast<size_t>(index) * ChunkBytes);
+        };
+        int sent = 0;
+        const auto send = [&](size_t bytes) {
+            std::memcpy(plain.data(), &chunk, sizeof(chunk));
+            SendSealed(*current, Type::Video, plain.data(), sizeof(chunk) + bytes, sealed.data());
+            // Spread big frames a little so routers and the Switch's Wi-Fi keep up
+            if (++sent % 16 == 0) {
+                PaceMicros(250);
             }
+        };
+
+        for (uint16_t i = 0; i < chunk.data_count && current->active; ++i) {
+            chunk.index = i;
+            const size_t bytes = piece_size(i);
+            std::memcpy(plain.data() + sizeof(chunk), frame.data() + size_t{i} * ChunkBytes,
+                        bytes);
+            send(bytes);
         }
-        ++frame_number;
+        for (uint16_t p = 0; p < chunk.parity_count && current->active; ++p) {
+            uint8_t* parity = plain.data() + sizeof(chunk);
+            std::memset(parity, 0, ChunkBytes);
+            size_t longest = 0;
+            for (uint32_t i = p; i < chunk.data_count; i += chunk.parity_count) {
+                const size_t bytes = piece_size(static_cast<uint16_t>(i));
+                const uint8_t* piece = frame.data() + size_t{i} * ChunkBytes;
+                for (size_t b = 0; b < bytes; ++b) {
+                    parity[b] ^= piece[b];
+                }
+                longest = std::max(longest, bytes);
+            }
+            chunk.index = static_cast<uint16_t>(chunk.data_count + p);
+            send(longest);
+        }
     }
     source->Close();
 }
@@ -341,20 +511,21 @@ void Host::AudioLoop(std::shared_ptr<Session> current) {
         return;
     }
     std::vector<uint8_t> opus;
-    std::vector<uint8_t> packet(sizeof(Header) + sizeof(AudioChunk) + 1500);
+    std::vector<uint8_t> plain(sizeof(AudioChunk) + 1300);
+    std::vector<uint8_t> sealed(plain.size() + SealOverhead);
     uint32_t sequence = 0;
     while (current->active) {
         if (!source->Next(opus)) {
             break;
         }
-        if (opus.empty() || opus.size() > 1500) {
+        if (opus.empty() || opus.size() > 1300) {
             continue;
         }
-        const size_t offset = WriteHeader(packet.data(), Type::Audio);
         const AudioChunk chunk{sequence++};
-        std::memcpy(packet.data() + offset, &chunk, sizeof(chunk));
-        std::memcpy(packet.data() + offset + sizeof(chunk), opus.data(), opus.size());
-        SendTo(current, packet.data(), offset + sizeof(chunk) + opus.size());
+        std::memcpy(plain.data(), &chunk, sizeof(chunk));
+        std::memcpy(plain.data() + sizeof(chunk), opus.data(), opus.size());
+        SendSealed(*current, Type::Audio, plain.data(), sizeof(chunk) + opus.size(),
+                   sealed.data());
     }
     source->Close();
 }
