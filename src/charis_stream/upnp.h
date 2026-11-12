@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 
@@ -28,6 +29,10 @@ public:
     Address External() const {
         return external;
     }
+    // When *flag turns true, whatever is in progress gives up at once (the app is closing)
+    void SetCancelFlag(const std::atomic<bool>* flag) {
+        cancel = flag;
+    }
     bool IsReachable() const;
 
 private:
@@ -44,6 +49,7 @@ private:
     uint32_t lease_seconds = 3600;
     Address external;
     bool mapped = false;
+    const std::atomic<bool>* cancel = nullptr;
 };
 
 // True for addresses that cannot be reached from the internet (home and provider networks).

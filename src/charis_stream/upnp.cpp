@@ -47,16 +47,31 @@ void SetBlocking(socket_type handle, bool blocking) {
 #endif
 }
 
-bool WaitFor(socket_type handle, bool write, int timeout_ms) {
-    fd_set set;
-    FD_ZERO(&set);
-    FD_SET(handle, &set);
-    timeval timeout{};
-    timeout.tv_sec = timeout_ms / 1000;
-    timeout.tv_usec = (timeout_ms % 1000) * 1000;
-    const int ready = select(static_cast<int>(handle) + 1, write ? nullptr : &set,
-                             write ? &set : nullptr, nullptr, &timeout);
-    return ready > 0;
+// Waits in short slices so a cancel flag is noticed within 100 ms
+bool WaitFor(socket_type handle, bool write, int timeout_ms,
+             const std::atomic<bool>* cancel = nullptr) {
+    const int64_t until = NowMs() + timeout_ms;
+    while (true) {
+        if (cancel != nullptr && cancel->load()) {
+            return false;
+        }
+        const int64_t left = until - NowMs();
+        if (left <= 0) {
+            return false;
+        }
+        const int slice = static_cast<int>(left < 100 ? left : 100);
+        fd_set set;
+        FD_ZERO(&set);
+        FD_SET(handle, &set);
+        timeval timeout{};
+        timeout.tv_sec = 0;
+        timeout.tv_usec = slice * 1000;
+        const int ready = select(static_cast<int>(handle) + 1, write ? nullptr : &set,
+                                 write ? &set : nullptr, nullptr, &timeout);
+        if (ready != 0) {
+            return ready > 0;
+        }
+    }
 }
 
 bool ParseIp(const std::string& text, uint32_t& ip) {
@@ -147,7 +162,10 @@ std::string Dechunk(const std::string& body) {
 
 // One HTTP/1.1 exchange with Connection: close. Returns the status code, 0 on failure.
 int HttpExchange(const std::string& host, uint16_t port, const std::string& request,
-                 std::string& body) {
+                 std::string& body, const std::atomic<bool>* cancel) {
+    if (cancel != nullptr && cancel->load()) {
+        return 0;
+    }
     uint32_t ip = 0;
     if (!ParseIp(host, ip) && !ResolveHost(host, ip)) {
         return 0;
@@ -162,7 +180,7 @@ int HttpExchange(const std::string& host, uint16_t port, const std::string& requ
     target.sin_port = htons(port);
     SetBlocking(handle, false);
     connect(handle, reinterpret_cast<sockaddr*>(&target), sizeof(target));
-    bool connected = WaitFor(handle, true, HttpTimeoutMs);
+    bool connected = WaitFor(handle, true, HttpTimeoutMs, cancel);
     if (connected) {
         int error = 0;
         socklen_type size = sizeof(error);
@@ -175,7 +193,7 @@ int HttpExchange(const std::string& host, uint16_t port, const std::string& requ
     }
     size_t sent = 0;
     while (sent < request.size()) {
-        if (!WaitFor(handle, true, HttpTimeoutMs)) {
+        if (!WaitFor(handle, true, HttpTimeoutMs, cancel)) {
             CLOSE_SOCKET(handle);
             return 0;
         }
@@ -189,7 +207,7 @@ int HttpExchange(const std::string& host, uint16_t port, const std::string& requ
     }
     std::string response;
     char buffer[4096];
-    while (response.size() < 512 * 1024 && WaitFor(handle, false, HttpTimeoutMs)) {
+    while (response.size() < 512 * 1024 && WaitFor(handle, false, HttpTimeoutMs, cancel)) {
         const auto count = recv(handle, buffer, sizeof(buffer), 0);
         if (count <= 0) {
             break;
@@ -300,7 +318,8 @@ bool PortMapping::Discover() {
     int64_t until = NowMs() + DiscoverMs;
     char buffer[2048];
     while (NowMs() < until) {
-        if (!WaitFor(handle, false, static_cast<int>(std::max<int64_t>(1, until - NowMs())))) {
+        if (!WaitFor(handle, false, static_cast<int>(std::max<int64_t>(1, until - NowMs())),
+                     cancel)) {
             break;
         }
         const auto count = recv(handle, buffer, sizeof(buffer) - 1, 0);
@@ -341,7 +360,7 @@ bool PortMapping::Discover() {
         const std::string request = "GET " + path + " HTTP/1.1\r\nHost: " + host + ":" +
                                     std::to_string(port) +
                                     "\r\nConnection: close\r\nUser-Agent: Charis/1.0 UPnP/1.1\r\n\r\n";
-        if (HttpExchange(host, port, request, xml) != 200) {
+        if (HttpExchange(host, port, request, xml, cancel) != 200) {
             continue;
         }
         std::string base_host = host;
@@ -382,7 +401,7 @@ namespace {
 
 int Soap(const std::string& host, uint16_t port, const std::string& path,
          const std::string& service, const std::string& action, const std::string& arguments,
-         std::string& response) {
+         std::string& response, const std::atomic<bool>* cancel) {
     const std::string body =
         "<?xml version=\"1.0\"?>\r\n"
         "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" "
@@ -397,7 +416,7 @@ int Soap(const std::string& host, uint16_t port, const std::string& path,
                                 service + "#" + action +
                                 "\"\r\nConnection: close\r\nContent-Length: " +
                                 std::to_string(body.size()) + "\r\n\r\n" + body;
-    return HttpExchange(host, port, request, response);
+    return HttpExchange(host, port, request, response, cancel);
 }
 
 } // namespace
@@ -416,7 +435,7 @@ bool PortMapping::AddMapping(uint16_t external_port, uint32_t lease, int& upnp_e
         "</NewLeaseDuration>";
     std::string response;
     const int status = Soap(control_host, control_port, control_path, service_type,
-                            "AddPortMapping", arguments, response);
+                            "AddPortMapping", arguments, response, cancel);
     upnp_error = status == 200 ? 0 : std::atoi(XmlValue(response, "errorCode").c_str());
     if (status != 200 && upnp_error == 0) {
         upnp_error = -1;
@@ -427,7 +446,7 @@ bool PortMapping::AddMapping(uint16_t external_port, uint32_t lease, int& upnp_e
 bool PortMapping::QueryExternalIp() {
     std::string response;
     if (Soap(control_host, control_port, control_path, service_type, "GetExternalIPAddress", "",
-             response) != 200) {
+             response, cancel) != 200) {
         return false;
     }
     uint32_t ip = 0;
@@ -499,7 +518,7 @@ void PortMapping::Remove() {
                                   "</NewExternalPort><NewProtocol>UDP</NewProtocol>";
     std::string response;
     Soap(control_host, control_port, control_path, service_type, "DeletePortMapping", arguments,
-         response);
+         response, cancel);
     external = {};
 }
 

@@ -14,6 +14,8 @@
 namespace Platform {
 
 void Init();
+// One line in the app's log on the SD card (config/charis-stream/log.txt), printf style
+void Log(const char* format, ...) __attribute__((format(printf, 1, 2)));
 void Exit();
 bool Running(); // false when the system asks the app to close
 
@@ -33,6 +35,8 @@ void Store(const Saved& saved);
 
 // HTTPS through libcurl (the Switch's own TLS service on the console)
 std::unique_ptr<CharisStream::Http> MakeHttp();
+// The app is closing: requests in progress give up at once, new ones fail right away
+void CancelHttp();
 
 // The system keyboard. Returns false when the user cancelled.
 bool Keyboard(const std::string& header, const std::string& guide, const std::string& initial,

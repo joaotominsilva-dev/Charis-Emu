@@ -53,6 +53,7 @@ public:
 
 private:
     void Loop();
+    void Run();
     bool WaitFor(int64_t ms); // false when stopping
     bool EnsureToken(Account& account, Status& next);
 
@@ -66,6 +67,8 @@ private:
 
     std::thread thread;
     std::atomic<bool> running{false};
+    std::atomic<bool> cancel{false}; // stop now: give up on network calls in progress
+    bool finished = false;           // the loop is over (under mutex)
     mutable std::mutex mutex; // wake, poke, game, credentials
     std::condition_variable wake;
     bool poke = false;

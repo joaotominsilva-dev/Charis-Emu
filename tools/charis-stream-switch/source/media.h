@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <deque>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -44,13 +45,17 @@ public:
     uint32_t Decoded() const {
         return decoded;
     }
+    // How the picture is being decoded, for the screen while it opens and for the log
+    std::string Status() const;
     float DecodeMs() const {
         return decode_ms;
     }
 
 private:
     void Loop();
+    bool OpenCodec(bool hardware);
     bool Upload(SDL_Renderer* renderer, AVFrame* picture);
+    void SetStatus(const std::string& text);
 
     AVCodecContext* codec = nullptr;
     AVPacket* packet = nullptr;
@@ -79,6 +84,13 @@ private:
     int texture_w = 0;
     int texture_h = 0;
     bool has_picture = false;
+
+    bool hardware = false;
+    int hardware_failures = 0;
+    bool nv12_textures = true; // false when the renderer cannot take NV12: planar copy instead
+    std::vector<uint8_t> planar_u, planar_v;
+    mutable std::mutex status_mutex;
+    std::string status = "Preparando o vídeo";
 
     std::atomic<bool> wants_keyframe{false};
     std::atomic<uint32_t> decoded{0};

@@ -38,8 +38,15 @@ void Presence::Start() {
 
 void Presence::Stop() {
     if (running.exchange(false)) {
-        std::scoped_lock lock{mutex};
+        std::unique_lock lock{mutex};
         wake.notify_all();
+        // A moment to finish cleanly (close the router port); a slow network does not get to
+        // hold up the app any longer than that
+        if (!wake.wait_for(lock, std::chrono::milliseconds(1200), [this] { return finished; })) {
+            cancel = true;
+            lock.unlock();
+            http.Cancel();
+        }
     }
     if (thread.joinable()) {
         thread.join();
@@ -68,6 +75,7 @@ void Presence::SetGame(const std::string& title) {
 bool Presence::WaitFor(int64_t ms) {
     std::unique_lock lock{mutex};
     wake.wait_for(lock, std::chrono::milliseconds(ms), [this] { return !running.load() || poke; });
+    // Stop waits on the same condition for the loop to finish
     poke = false;
     return running;
 }
@@ -117,8 +125,16 @@ bool Presence::EnsureToken(Account& account, Status& next) {
 }
 
 void Presence::Loop() {
+    Run();
+    std::scoped_lock lock{mutex};
+    finished = true;
+    wake.notify_all();
+}
+
+void Presence::Run() {
     Account account{http, server_url};
     PortMapping mapping;
+    mapping.SetCancelFlag(&cancel);
     int64_t next_mapping_try = 0;
     int64_t next_mapping_refresh = 0;
     int64_t backoff_ms = 2000;

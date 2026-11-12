@@ -1,7 +1,11 @@
 // SPDX-FileCopyrightText: 2026 Charis
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <atomic>
+#include <cstdarg>
 #include <cstdio>
+#include <ctime>
+#include <mutex>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -33,6 +37,12 @@ std::string StorePath() {
 #endif
 }
 
+std::atomic<bool> http_cancelled{false};
+
+int Progress(void*, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
+    return http_cancelled ? 1 : 0; // non-zero aborts the transfer
+}
+
 size_t Collect(char* data, size_t size, size_t count, void* user) {
     auto* out = static_cast<std::string*>(user);
     if (out->size() > 256 * 1024) {
@@ -46,6 +56,9 @@ class CurlHttp final : public CharisStream::Http {
 public:
     bool Post(const std::string& url, const std::string& body, std::string& response) override {
         response.clear();
+        if (http_cancelled) {
+            return false;
+        }
         CURL* curl = curl_easy_init();
         if (curl == nullptr) {
             return false;
@@ -56,17 +69,53 @@ public:
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, Collect);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
         curl_easy_setopt(curl, CURLOPT_USERAGENT, "CharisStream/2.0");
-        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 6L);
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 12L);
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 5L);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
         curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+        curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+        curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, Progress);
         curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
         const CURLcode result = curl_easy_perform(curl);
         curl_easy_cleanup(curl);
         return result == CURLE_OK;
     }
+    void Cancel() override {
+        http_cancelled = true;
+    }
 };
 
+std::mutex log_mutex;
+FILE* log_file = nullptr;
+
+std::string LogPath(bool previous) {
+#ifdef __SWITCH__
+    return previous ? "sdmc:/config/charis-stream/log-anterior.txt"
+                    : "sdmc:/config/charis-stream/log.txt";
+#else
+    const char* custom = std::getenv("CHARIS_LOG");
+    const std::string base = custom != nullptr ? custom : "charis-stream-log.txt";
+    return previous ? base + ".old" : base;
+#endif
+}
+
 } // namespace
+
+void Log(const char* format, ...) {
+    std::scoped_lock lock{log_mutex};
+    if (log_file == nullptr) {
+        return;
+    }
+    const std::time_t now = std::time(nullptr);
+    char stamp[32];
+    std::strftime(stamp, sizeof(stamp), "%H:%M:%S", std::localtime(&now));
+    std::fprintf(log_file, "[%s] ", stamp);
+    va_list args;
+    va_start(args, format);
+    std::vfprintf(log_file, format, args);
+    va_end(args);
+    std::fputc('\n', log_file);
+    std::fflush(log_file);
+}
 
 void Init() {
 #ifdef __SWITCH__
@@ -75,9 +124,20 @@ void Init() {
     setsysInitialize();
 #endif
     curl_global_init(CURL_GLOBAL_DEFAULT);
+    StorePath(); // makes the folder
+    std::rename(LogPath(false).c_str(), LogPath(true).c_str());
+    log_file = std::fopen(LogPath(false).c_str(), "w");
 }
 
 void Exit() {
+    Log("app fechado");
+    {
+        std::scoped_lock lock{log_mutex};
+        if (log_file != nullptr) {
+            std::fclose(log_file);
+            log_file = nullptr;
+        }
+    }
     curl_global_cleanup();
 #ifdef __SWITCH__
     KeepAwake(false);
@@ -136,6 +196,10 @@ void Store(const Saved& saved) {
          << "client=" << saved.client_id << "\n"
          << "last_host=" << saved.last_host << "\n"
          << "quality=" << saved.quality << "\n";
+}
+
+void CancelHttp() {
+    http_cancelled = true;
 }
 
 std::unique_ptr<CharisStream::Http> MakeHttp() {

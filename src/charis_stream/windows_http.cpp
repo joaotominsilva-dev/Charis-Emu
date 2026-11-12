@@ -13,7 +13,9 @@ std::unique_ptr<Http> MakeSystemHttp() {
 
 #else
 
+#include <atomic>
 #include <iterator>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -38,15 +40,13 @@ std::wstring Widen(const std::string& text) {
 class WinHttp final : public Http {
 public:
     WinHttp() {
-        session = WinHttpOpen(L"CharisSwitch/1.2", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+        // The system's fixed proxy setting, without automatic proxy discovery: that discovery
+        // can take seconds on every start and would hold up the app when it closes
+        session = WinHttpOpen(L"CharisSwitch/1.2", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                               WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-        if (session == nullptr) { // Windows before 8.1 has no automatic proxy
-            session = WinHttpOpen(L"CharisSwitch/1.2", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-                                  WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-        }
         if (session != nullptr) {
             // resolve, connect, send, receive: a slow network gives up in seconds, not minutes
-            WinHttpSetTimeouts(session, 5000, 5000, 8000, 8000);
+            WinHttpSetTimeouts(session, 4000, 4000, 6000, 6000);
         }
     }
     ~WinHttp() override {
@@ -55,9 +55,19 @@ public:
         }
     }
 
+    void Cancel() override {
+        std::scoped_lock lock{mutex};
+        cancelled = true;
+        if (active != nullptr) {
+            // Closing the request handle makes the blocked call in the other thread return
+            WinHttpCloseHandle(active);
+            active = nullptr;
+        }
+    }
+
     bool Post(const std::string& url, const std::string& body, std::string& response) override {
         response.clear();
-        if (session == nullptr) {
+        if (session == nullptr || cancelled) {
             return false;
         }
         const std::wstring wide_url = Widen(url);
@@ -77,9 +87,17 @@ public:
             return false;
         }
         const DWORD flags = parts.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0;
-        const HINTERNET request =
+        HINTERNET request =
             WinHttpOpenRequest(connection, L"POST", path, nullptr, WINHTTP_NO_REFERER,
                                WINHTTP_DEFAULT_ACCEPT_TYPES, flags);
+        {
+            std::scoped_lock lock{mutex};
+            if (cancelled && request != nullptr) {
+                WinHttpCloseHandle(request);
+                request = nullptr;
+            }
+            active = request;
+        }
         bool ok = false;
         if (request != nullptr) {
             const wchar_t* headers = L"Content-Type: application/x-www-form-urlencoded\r\n";
@@ -109,14 +127,21 @@ public:
                     break;
                 }
             }
-            WinHttpCloseHandle(request);
+            std::scoped_lock lock{mutex};
+            if (active == request) { // not already closed by Cancel
+                WinHttpCloseHandle(request);
+                active = nullptr;
+            }
         }
         WinHttpCloseHandle(connection);
-        return ok;
+        return ok && !cancelled;
     }
 
 private:
     HINTERNET session = nullptr;
+    std::mutex mutex;
+    HINTERNET active = nullptr;
+    std::atomic<bool> cancelled{false};
 };
 
 } // namespace

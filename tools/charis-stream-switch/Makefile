@@ -12,7 +12,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 
 APP_TITLE   := Charis Stream
 APP_AUTHOR  := Charis
-APP_VERSION := 2.0.1
+APP_VERSION := 2.0.2
 ICON        := icon.jpg
 
 TARGET      := charis-stream

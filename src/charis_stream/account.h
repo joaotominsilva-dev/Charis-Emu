@@ -22,6 +22,9 @@ public:
     virtual ~Http() = default;
     // POST a form-encoded body; false when the server could not be reached at all.
     virtual bool Post(const std::string& url, const std::string& body, std::string& response) = 0;
+    // From another thread: abort the request in progress and fail the next ones at once
+    // (the app is closing and should not wait for a slow network).
+    virtual void Cancel() {}
 };
 
 struct HostEntry {

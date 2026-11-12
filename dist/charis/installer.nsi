@@ -236,6 +236,24 @@ Section "Charis Switch" SecMain
   ${If} $DesktopShortcut == ${BST_CHECKED}
     CreateShortCut "$DESKTOP\${PRODUCT_NAME}.lnk" "$INSTDIR\${PRODUCT_EXE}" "" "$INSTDIR\charis.ico"
   ${EndIf}
+
+  ; Charis Stream: the Switch finds this PC on the network and sends it the controller, so the
+  ; Windows Firewall has to let the program receive. Done once (it needs administrator rights);
+  ; also removes "block" rules Windows makes when its own question was answered with Cancel.
+  ReadRegStr $0 HKCU "${PRODUCT_UNINST_KEY}" "FirewallRule"
+  ${If} $0 != "$INSTDIR\${PRODUCT_EXE}"
+    DetailPrint "Liberando o ${PRODUCT_NAME} no Firewall do Windows..."
+    MessageBox MB_OK|MB_ICONINFORMATION "Para o Switch achar este PC, o Windows vai pedir permissão para liberar o ${PRODUCT_NAME} na rede.$\r$\n$\r$\nNa próxima janela, clique em Sim." /SD IDOK
+    ExecShellWait "runas" "$SYSDIR\cmd.exe" '/c netsh advfirewall firewall delete rule name=all program="$INSTDIR\${PRODUCT_EXE}" & netsh advfirewall firewall add rule name="${PRODUCT_NAME}" dir=in action=allow program="$INSTDIR\${PRODUCT_EXE}" enable=yes profile=any' SW_HIDE
+    nsExec::Exec 'netsh advfirewall firewall show rule name="${PRODUCT_NAME}"'
+    Pop $1
+    ${If} $1 == 0
+      WriteRegStr HKCU "${PRODUCT_UNINST_KEY}" "FirewallRule" "$INSTDIR\${PRODUCT_EXE}"
+      DetailPrint "Pronto: o Switch pode achar este PC."
+    ${Else}
+      DetailPrint "O Firewall não foi liberado agora; o Windows vai perguntar de novo ao jogar no Switch."
+    ${EndIf}
+  ${EndIf}
 SectionEnd
 
 Section -Post

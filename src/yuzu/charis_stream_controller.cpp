@@ -56,6 +56,8 @@ CharisStreamController::CharisStreamController(
 }
 
 CharisStreamController::~CharisStreamController() {
+    // Deleted with the main window: nobody is left to hear about it
+    blockSignals(true);
     Stop();
 }
 

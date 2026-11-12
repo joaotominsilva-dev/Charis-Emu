@@ -34,27 +34,61 @@ VideoDecoder::~VideoDecoder() {
     Close();
 }
 
-bool VideoDecoder::Open() {
+bool VideoDecoder::OpenCodec(bool use_hardware) {
     const AVCodec* decoder = avcodec_find_decoder(AV_CODEC_ID_H264);
     if (decoder == nullptr) {
+        SetStatus("Este app não tem decodificador H.264");
         return false;
     }
     codec = avcodec_alloc_context3(decoder);
     codec->flags |= AV_CODEC_FLAG_LOW_DELAY;
     codec->flags2 |= AV_CODEC_FLAG2_FAST;
+    hardware = false;
 #ifdef __SWITCH__
-    // The Switch's own video chip does the decoding
-    AVBufferRef* device = nullptr;
-    if (av_hwdevice_ctx_create(&device, AV_HWDEVICE_TYPE_NVTEGRA, nullptr, nullptr, 0) == 0) {
-        codec->hw_device_ctx = device;
-        codec->get_format = PickFormat;
+    if (use_hardware) {
+        // The Switch's own video chip does the decoding
+        AVBufferRef* device = nullptr;
+        if (av_hwdevice_ctx_create(&device, AV_HWDEVICE_TYPE_NVTEGRA, nullptr, nullptr, 0) == 0) {
+            codec->hw_device_ctx = device;
+            codec->get_format = PickFormat;
+            hardware = true;
+        }
+    }
+    if (!hardware) {
+        // The processor does it: a little more delay, but it works everywhere
+        codec->thread_count = 3;
+        codec->thread_type = FF_THREAD_FRAME;
     }
 #else
+    (void)use_hardware;
     codec->thread_count = 2;
     codec->thread_type = FF_THREAD_SLICE;
 #endif
     if (avcodec_open2(codec, decoder, nullptr) < 0) {
         avcodec_free_context(&codec);
+        if (hardware) {
+            return OpenCodec(false);
+        }
+        SetStatus("O decodificador de vídeo não abriu");
+        return false;
+    }
+    hardware_failures = 0;
+    SetStatus(hardware ? "Vídeo pelo chip de vídeo do Switch" : "Vídeo pelo processador");
+    return true;
+}
+
+void VideoDecoder::SetStatus(const std::string& text) {
+    std::scoped_lock lock{status_mutex};
+    status = text;
+}
+
+std::string VideoDecoder::Status() const {
+    std::scoped_lock lock{status_mutex};
+    return status;
+}
+
+bool VideoDecoder::Open() {
+    if (!OpenCodec(true)) {
         return false;
     }
     packet = av_packet_alloc();
@@ -116,6 +150,7 @@ void VideoDecoder::Reset() {
 }
 
 void VideoDecoder::Loop() {
+    int submitted_without_picture = 0;
     while (running) {
         Encoded next;
         {
@@ -139,11 +174,12 @@ void VideoDecoder::Loop() {
         if (next.keyframe) {
             packet->flags |= AV_PKT_FLAG_KEY;
         }
-        if (avcodec_send_packet(codec, packet) < 0) {
+        bool failed = avcodec_send_packet(codec, packet) < 0;
+        bool got_picture = false;
+        if (failed) {
             wants_keyframe = true;
             std::scoped_lock lock{queue_mutex};
             skip_to_keyframe = true;
-            continue;
         }
         while (avcodec_receive_frame(codec, frame) == 0) {
             AVFrame* picture = frame;
@@ -151,10 +187,12 @@ void VideoDecoder::Loop() {
                 av_frame_unref(converted);
                 if (av_hwframe_transfer_data(converted, frame, 0) < 0) {
                     av_frame_unref(frame);
+                    failed = true;
                     continue;
                 }
                 picture = converted;
             }
+            got_picture = true;
             if (frame->decode_error_flags != 0 || (frame->flags & AV_FRAME_FLAG_CORRUPT)) {
                 wants_keyframe = true;
             }
@@ -168,6 +206,24 @@ void VideoDecoder::Loop() {
                 av_frame_unref(frame);
             }
             ++decoded;
+        }
+        // The video chip keeps failing: switch to the processor and start from a keyframe
+        if (hardware) {
+            hardware_failures = got_picture ? 0 : hardware_failures + (failed ? 1 : 0);
+            submitted_without_picture = decoded == 0 ? submitted_without_picture + 1 : 0;
+            if (hardware_failures >= 15 || (decoded == 0 && hardware_failures >= 5) ||
+                submitted_without_picture > 150) {
+                submitted_without_picture = 0;
+                avcodec_free_context(&codec);
+                if (!OpenCodec(false)) {
+                    break;
+                }
+                std::scoped_lock lock{queue_mutex};
+                queue.clear();
+                skip_to_keyframe = true;
+                wants_keyframe = true;
+                continue;
+            }
         }
         const float ms = std::chrono::duration<float, std::milli>(
                              std::chrono::steady_clock::now() - started)
@@ -198,7 +254,8 @@ bool VideoDecoder::Upload(SDL_Renderer* renderer, AVFrame* picture) {
     if (!nv12 && picture->format != AV_PIX_FMT_YUV420P && picture->format != AV_PIX_FMT_YUVJ420P) {
         return false;
     }
-    const int format = nv12 ? SDL_PIXELFORMAT_NV12 : SDL_PIXELFORMAT_IYUV;
+    const bool as_nv12 = nv12 && nv12_textures;
+    const int format = as_nv12 ? SDL_PIXELFORMAT_NV12 : SDL_PIXELFORMAT_IYUV;
     if (texture == nullptr || texture_format != format || texture_w != picture->width ||
         texture_h != picture->height) {
         if (texture != nullptr) {
@@ -206,14 +263,36 @@ bool VideoDecoder::Upload(SDL_Renderer* renderer, AVFrame* picture) {
         }
         texture = SDL_CreateTexture(renderer, format, SDL_TEXTUREACCESS_STREAMING, picture->width,
                                     picture->height);
+        if (texture == nullptr && as_nv12) {
+            nv12_textures = false; // this renderer cannot: copy to planar and try again
+            return Upload(renderer, picture);
+        }
         if (texture == nullptr) {
+            SetStatus(std::string("A tela não aceitou o vídeo: ") + SDL_GetError());
             return false;
         }
         texture_format = format;
         texture_w = picture->width;
         texture_h = picture->height;
     }
-    if (nv12) {
+    if (nv12 && !as_nv12) {
+        // NV12 to planar: split the interleaved colour plane in two
+        const int w = picture->width / 2;
+        const int h = picture->height / 2;
+        planar_u.resize(static_cast<size_t>(w) * h);
+        planar_v.resize(static_cast<size_t>(w) * h);
+        for (int y = 0; y < h; ++y) {
+            const uint8_t* row = picture->data[1] + y * picture->linesize[1];
+            uint8_t* u = planar_u.data() + y * w;
+            uint8_t* v = planar_v.data() + y * w;
+            for (int x = 0; x < w; ++x) {
+                u[x] = row[x * 2];
+                v[x] = row[x * 2 + 1];
+            }
+        }
+        SDL_UpdateYUVTexture(texture, nullptr, picture->data[0], picture->linesize[0],
+                             planar_u.data(), w, planar_v.data(), w);
+    } else if (nv12) {
         SDL_UpdateNVTexture(texture, nullptr, picture->data[0], picture->linesize[0],
                             picture->data[1], picture->linesize[1]);
     } else {

@@ -5108,6 +5108,13 @@ void MainWindow::closeEvent(QCloseEvent* event) {
     UISettings::SaveWindowState();
     hotkey_registry.SaveHotkeys();
 
+    // Charis Stream first, while the input devices and the network it uses are still there,
+    // and quietly: the window it reports to is going away
+    if (charis_stream) {
+        charis_stream->blockSignals(true);
+        charis_stream->Stop();
+    }
+
     // Unload controllers early
     controller_dialog->UnloadController();
     game_list->UnloadController();

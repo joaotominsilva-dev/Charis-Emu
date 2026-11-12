@@ -52,6 +52,11 @@ public:
     bool Busy() const {
         return busy;
     }
+    void Join() {
+        if (thread.joinable()) {
+            thread.join();
+        }
+    }
     void Run(std::function<std::function<void()>()> job) {
         if (busy) {
             return;
@@ -145,6 +150,7 @@ private:
     std::unique_ptr<Client> client;
     Key32 key{};
     Background background;
+    std::vector<std::thread> side_threads;
     Screen screen = Screen::Login;
     int64_t now = 0;
     bool quit = false;
@@ -191,6 +197,7 @@ private:
     int home_frames = 0;
     int64_t combo_since = 0;
     bool combo_latched = false;
+    int64_t last_stats_log = 0;
     std::string toast;
     int64_t toast_until = 0;
     int64_t help_until = 0;
@@ -255,6 +262,8 @@ void App::SubmitLogin() {
                    : account.Login(user, keys_made.auth_hex, token, "switch", device);
         const bool offline = !error.empty() && account.Unavailable();
         return [this, error, offline, create, user, token, keys_made] {
+            Platform::Log("login %s: %s", user.c_str(),
+                          error.empty() ? "ok" : (offline ? "sem servidor, so em casa" : error.c_str()));
             if (!error.empty() && !offline) {
                 login_error = error;
                 return;
@@ -493,6 +502,10 @@ void App::RefreshHosts() {
                 saved.create_pending = false;
                 Platform::Store(saved);
             }
+            if (error != list_error || hosts.size() != server_hosts.size()) {
+                Platform::Log("lista da conta: %zu PC(s)%s%s", hosts.size(),
+                              error.empty() ? "" : ", erro: ", error.c_str());
+            }
             list_error = error;
             if (error.empty()) {
                 server_hosts = hosts;
@@ -702,14 +715,15 @@ void App::SendConnectRequest() {
     const std::string host_id = target.id;
     const std::string client_id = saved.client_id;
     const std::string name = Platform::DeviceName();
-    std::thread([this, token, host_id, client_id, name, public_address, local] {
+    // Its own thread, so the list refresh never makes a connection wait; joined on exit
+    side_threads.emplace_back([this, token, host_id, client_id, name, public_address, local] {
         Account account{*http};
         std::vector<Address> locals;
         if (local.Valid()) {
             locals.push_back(local);
         }
         account.RequestConnect(token, host_id, client_id, name, public_address, locals);
-    }).detach();
+    });
 }
 
 void App::Connect(const Entry& entry) {
@@ -723,6 +737,13 @@ void App::Connect(const Entry& entry) {
     settings.height = static_cast<uint16_t>(output_w >= 1920 ? 1080 : 720);
     settings.fps = 60;
     settings.bitrate_kbps = BitrateFor(entry.home);
+    std::string where;
+    for (const Address& address : entry.addresses) {
+        where += address.ToString() + " ";
+    }
+    Platform::Log("conectando em %s (%s) %ux%u %u kbps: %s", entry.name.c_str(),
+                  entry.home ? "em casa" : "internet", settings.width, settings.height,
+                  settings.bitrate_kbps, where.c_str());
     client->SetDiscovery(false);
     client->Connect(entry.addresses, settings);
     connect_started = now;
@@ -740,6 +761,7 @@ void App::ConnectingFrame(uint64_t pressed) {
     }
     const Client::State state = client->GetState();
     if (state == Client::State::Streaming) {
+        Platform::Log("conectado em %lld ms", static_cast<long long>(now - connect_started));
         screen = Screen::Streaming;
         desktop = false;
         menu_open = false;
@@ -759,6 +781,7 @@ void App::ConnectingFrame(uint64_t pressed) {
         return;
     }
     if (state == Client::State::Failed) {
+        Platform::Log("falhou ao conectar: %s", client->FailureReason().c_str());
         StopStreaming("Não deu para conectar", client->FailureReason());
         return;
     }
@@ -867,8 +890,17 @@ void App::StreamingFrame(const PadSnapshot& pad, uint64_t pressed, int dt_ms) {
     }
     const Client::State state = client->GetState();
     if (state == Client::State::Failed) {
+        Platform::Log("conexao caiu: %s", client->FailureReason().c_str());
         StopStreaming("A conexão caiu", client->FailureReason());
         return;
+    }
+    // A line in the log every 10 s: enough to see what went wrong, if anything
+    if (now - last_stats_log > 10000) {
+        last_stats_log = now;
+        const ClientStats stats = client->Stats();
+        Platform::Log("jogando: %u quadros recebidos, %u perdidos, %u na tela, %.1f Mbps, perda "
+                      "%.1f%%, %s", stats.frames, stats.lost_frames, video.Decoded(),
+                      stats.bitrate_kbps / 1000.0, stats.loss_percent, video.Status().c_str());
     }
     if (state != Client::State::Streaming) {
         StopStreaming("", "");
@@ -967,6 +999,18 @@ void App::DrawStreaming() {
         ui.Page("CHARIS STREAM", "Abrindo a tela", 196);
         ui.Text(ui.title, target.name, 72, 240, Ink);
         ui.Dots(72 + ui.Measure(ui.title, target.name) + 26, 262, Ink, Now());
+        // What is happening, so a stuck screen says why
+        const ClientStats stats = client ? client->Stats() : ClientStats{};
+        char line[200];
+        std::snprintf(line, sizeof(line), "Conectado. Quadros recebidos do PC: %u. %s.",
+                      stats.frames, video.Status().c_str());
+        ui.Paragraph(ui.body, line, 72, 300, 1136, InkSoft);
+        if (stats.frames == 0 && now - connect_started > 6000) {
+            ui.Paragraph(ui.body,
+                         "O PC aceitou a conexão, mas não está mandando a imagem. No PC, veja se "
+                         "a placa de vídeo é NVIDIA e se o driver está atualizado.",
+                         72, 380, 1136, InkSoft);
+        }
     }
     if (desktop && !menu_open) {
         // Where the PC pointer is, while a finger is not on it
@@ -1080,6 +1124,8 @@ int App::Run() {
     pads.Open();
     http = Platform::MakeHttp();
     saved = Platform::Load();
+    Platform::Log("Charis Stream 2.0.2, tela %dx%d, %s", output_w, output_h,
+                  Platform::Docked() ? "na TV" : "portatil");
     form_user = saved.user;
 
     // Automated runs on a PC: CHARIS_USER and CHARIS_PASSWORD log in by themselves
@@ -1191,6 +1237,14 @@ int App::Run() {
 #endif
     }
 
+    // Closing must be quick: stop talking to the account server first, then the rest
+    Platform::CancelHttp();
+    background.Join();
+    for (std::thread& thread : side_threads) {
+        if (thread.joinable()) {
+            thread.join();
+        }
+    }
     if (client) {
         client->Disconnect();
         client->Close();

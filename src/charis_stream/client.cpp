@@ -297,9 +297,10 @@ void Client::Loop() {
                            sizeof(wanted));
             }
             if (now - started > ConnectForMs) {
-                Fail("Não consegui chegar no PC. Confira se o Charis Switch está aberto com a "
-                     "transmissão ligada. Fora de casa, algumas redes (como 4G) não deixam a "
-                     "conexão direta passar.");
+                Fail("O PC não respondeu. Confira: o Charis Switch está aberto no PC, com a "
+                     "mesma conta e senha daqui; e o Windows deixou o Charis Switch usar a rede "
+                     "(reinstale a versão nova e aceite o pedido de permissão). Fora de casa, "
+                     "algumas redes (como 4G) não deixam a conexão direta passar.");
             }
         }
 
