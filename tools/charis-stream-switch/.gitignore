@@ -3,3 +3,5 @@
 *.elf
 *.nacp
 *.nro
+/charis-stream-linux
+/monocypher.o

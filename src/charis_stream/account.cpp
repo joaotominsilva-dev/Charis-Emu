@@ -7,6 +7,11 @@
 
 namespace CharisStream {
 
+std::string DefaultServerUrl() {
+    const char* custom = std::getenv("CHARIS_ACCOUNT_URL");
+    return custom != nullptr && *custom != 0 ? custom : AccountServerUrl;
+}
+
 std::string UrlEncode(const std::string& text) {
     static const char digits[] = "0123456789ABCDEF";
     std::string out;
@@ -122,7 +127,7 @@ std::string Account::Login(const std::string& user, const std::string& auth_hex,
 std::string Account::HostPoll(const std::string& token, const std::string& host_id,
                               const std::string& name, const std::vector<Address>& local,
                               const Address& public_address,
-                              std::vector<ConnectRequest>& requests) {
+                              std::vector<ConnectRequest>& requests, int& next_poll_ms) {
     Fields answer;
     const std::string error = Call("host/poll",
                                    {{"token", token},
@@ -135,6 +140,8 @@ std::string Account::HostPoll(const std::string& token, const std::string& host_
     if (!error.empty()) {
         return error;
     }
+    const int next = std::atoi(answer["next"].c_str());
+    next_poll_ms = next >= 1000 && next <= 60000 ? next : 10000;
     const int count = std::atoi(answer["count"].c_str());
     for (int i = 0; i < count && i < 16; ++i) {
         const std::string prefix = "req." + std::to_string(i) + ".";

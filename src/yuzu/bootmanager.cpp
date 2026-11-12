@@ -227,6 +227,24 @@ std::pair<u32, u32> GRenderWindow::ScaleTouch(const QPointF& pos) const {
             static_cast<u32>((std::max)(std::round(pos.y() * pixel_ratio), qreal{0.0}))};
 }
 
+void GRenderWindow::ApplyStreamTouches(const QList<QPointF>& points, const QList<int>& ids) {
+    // Far from the ids Qt gives real touch screens on the PC
+    constexpr std::size_t StreamFingerBase = 1000;
+    auto* touch = input_subsystem->GetTouchScreen();
+    touch->ClearActiveFlag();
+    if (const QScreen* screen = QGuiApplication::primaryScreen()) {
+        const QRect area = screen->geometry();
+        for (qsizetype i = 0; i < points.size() && i < ids.size(); ++i) {
+            const QPointF global(area.x() + points[i].x() * area.width(),
+                                 area.y() + points[i].y() * area.height());
+            const auto [x, y] = ScaleTouch(mapFromGlobal(global));
+            const auto [touch_x, touch_y] = MapToTouchScreen(x, y);
+            touch->TouchMoved(touch_x, touch_y, StreamFingerBase + static_cast<std::size_t>(ids[i]));
+        }
+    }
+    touch->ReleaseInactiveTouch();
+}
+
 void GRenderWindow::closeEvent(QCloseEvent* event) {
     emit Closed();
     QWidget::closeEvent(event);

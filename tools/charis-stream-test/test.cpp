@@ -21,6 +21,8 @@
 #include "charis_stream/client.h"
 #include "charis_stream/crypto.h"
 #include "charis_stream/host.h"
+#include "charis_stream/presence.h"
+#include "charis_stream/upnp.h"
 
 using namespace CharisStream;
 
@@ -467,10 +469,12 @@ void AccountTests(const AccountKeys& keys, const AccountKeys& other) {
         Check(account.Login(user, keys.auth_hex, again).empty(), "entrar na conta");
         std::vector<ConnectRequest> requests;
         const std::vector<Address> local{Address::Parse("192.168.0.10:48010")};
+        int next_poll = 0;
         Check(account.HostPoll(token, "0102030405060708", "PC da sala", local,
-                               Address::Parse("200.1.2.3:40000"), requests)
-                  .empty(),
-              "o PC avisa o servidor que está ligado");
+                               Address::Parse("200.1.2.3:40000"), requests, next_poll)
+                      .empty() &&
+                  next_poll == 10000,
+              "o PC avisa o servidor que está ligado (e volta em 10 s)");
         std::vector<HostEntry> hosts;
         Check(account.ListHosts(again, hosts).empty() && hosts.size() == 1 &&
                   hosts[0].name == "PC da sala" && hosts[0].online &&
@@ -483,13 +487,160 @@ void AccountTests(const AccountKeys& keys, const AccountKeys& other) {
                   .empty(),
               "o Switch pede para conectar");
         Check(account.HostPoll(token, "0102030405060708", "PC da sala", local,
-                               Address::Parse("200.1.2.3:40000"), requests)
+                               Address::Parse("200.1.2.3:40000"), requests, next_poll)
                       .empty() &&
                   requests.size() == 1 &&
                   requests[0].public_address.ToString() == "177.4.5.6:50000",
               "o PC recebe o pedido com o endereço do Switch");
+        Check(next_poll == 1500, "com o Switch procurando, o PC chama a cada 1,5 s");
         Check(!account.ListHosts("token-falso", hosts).empty() && account.LoginExpired(),
               "login inválido é recusado");
+    }
+}
+
+
+std::string Fetch(const std::string& url) {
+    FILE* pipe = popen(("curl -s -m 5 '" + url + "'").c_str(), "r");
+    std::string out;
+    if (!pipe) {
+        return out;
+    }
+    char chunk[512];
+    size_t got;
+    while ((got = fread(chunk, 1, sizeof(chunk), pipe)) > 0) {
+        out.append(chunk, got);
+    }
+    pclose(pipe);
+    return out;
+}
+
+// Needs fake_igd.py running (CHARIS_UPNP_TEST=1)
+void UpnpTests() {
+    std::printf("== Roteador (UPnP)\n");
+    PortMapping mapping;
+    std::string error;
+    const int64_t started = NowMs();
+    Check(mapping.Map(48010, error), "o roteador abre uma porta para o PC (" + error + ")");
+    std::printf("       levou %lld ms\n", static_cast<long long>(NowMs() - started));
+    Check(mapping.External().ToString() == "203.0.113.7:48011",
+          "porta ocupada: usa a próxima e sabe o endereço externo (" +
+              mapping.External().ToString() + ")");
+    Check(mapping.IsReachable(), "o endereço externo serve para a internet");
+    Check(Fetch("http://127.0.0.1:5431/mappings").find("\"48011\"") != std::string::npos,
+          "o roteador guardou o redirecionamento");
+    Check(mapping.Refresh(), "renovar o redirecionamento");
+    mapping.Remove();
+    Check(Fetch("http://127.0.0.1:5431/mappings") == "{}", "fechar a porta ao sair");
+    Address cgnat;
+    cgnat.ip = Address::Parse("100.72.1.2:1").ip;
+    Check(IsPrivateIp(cgnat.ip) && !IsPrivateIp(Address::Parse("203.0.113.7:1").ip),
+          "reconhece endereço de operadora (CGNAT)");
+}
+
+// The PC side of the account: listed, found by the Switch, opens the way when asked
+void PresenceTests(const AccountKeys& keys, const char* server) {
+    std::printf("== PC na conta (%s)\n", server);
+    CurlHttp http;
+    Account account{http, server};
+    std::string token;
+    const std::string user = "pc" + std::to_string(NowMs() % 100000);
+    Check(account.Register(user, keys.auth_hex, token).empty(), "criar conta");
+
+    HostConfig config;
+    config.name = "PC teste";
+    config.key = keys.stream_key;
+    config.port = 0;
+    HostCallbacks callbacks;
+    callbacks.make_video = [] { return std::unique_ptr<VideoSource>{}; };
+    callbacks.make_audio = [] { return std::unique_ptr<AudioSource>{}; };
+    Host host{config, callbacks};
+    std::string error;
+    Check(host.Start(error), "PC escutando");
+    const bool upnp = std::getenv("CHARIS_UPNP_TEST") != nullptr;
+    std::atomic<int> changes{0};
+    Presence presence{http, host, token, "1122334455667788", "PC teste",
+                      [&](const Presence::Status&) { ++changes; }, server};
+    presence.Start();
+    int64_t until = NowMs() + 8000;
+    while (NowMs() < until && !presence.GetStatus().online) {
+        Sleep(50);
+    }
+    Check(presence.GetStatus().online,
+          "o PC aparece como ligado na conta " + presence.GetStatus().message);
+    if (upnp) {
+        Check(presence.GetStatus().router_port, "o PC avisa que o roteador abriu a porta");
+    }
+
+    std::vector<HostEntry> hosts;
+    Check(account.ListHosts(token, hosts).empty() && hosts.size() == 1 && hosts[0].online,
+          "o Switch vê o PC");
+    bool has_lan = false;
+    bool has_router = false;
+    if (!hosts.empty()) {
+        for (const Address& address : hosts[0].local) {
+            has_lan |= address.port == host.Port() && address.ip == PrimaryLocalIp();
+            has_router |= address.ToString().rfind("203.0.113.7:", 0) == 0;
+        }
+    }
+    Check(has_lan, "com o endereço da rede de casa");
+    if (upnp) {
+        Check(has_router, "e com o endereço da porta aberta no roteador");
+    }
+
+    UdpSocket switch_socket;
+    Check(switch_socket.Open(0, error), "Switch escutando");
+    Address switch_address;
+    switch_address.ip = Address::Parse("127.0.0.1:1").ip;
+    switch_address.port = switch_socket.Port();
+    const int64_t asked = NowMs();
+    Check(account
+              .RequestConnect(token, "1122334455667788", "aabbccddeeff0011", "Switch teste",
+                              switch_address, {switch_address})
+              .empty(),
+          "o Switch pede para conectar");
+    bool punched = false;
+    std::vector<uint8_t> buffer(2048);
+    until = NowMs() + 14000;
+    while (!punched && NowMs() < until) {
+        Address from;
+        const long size = switch_socket.ReceiveFrom(buffer.data(), buffer.size(), from, 200);
+        Header header;
+        if (size > 0 && ReadHeader(buffer.data(), static_cast<size_t>(size), header) >= 0 &&
+            header.type == Type::Punch) {
+            punched = true;
+        }
+    }
+    Check(punched, "o PC abre o caminho para o Switch em " + std::to_string(NowMs() - asked) +
+                       " ms (no máximo uma espera de 10 s)");
+    // Let the first round of punching end, then ask again: now the account knows a Switch
+    // is looking, so the PC picks the request up within a couple of seconds
+    const auto next_punch = [&](int64_t wait_ms) {
+        const int64_t stop = NowMs() + wait_ms;
+        while (NowMs() < stop) {
+            Address from;
+            const long size = switch_socket.ReceiveFrom(buffer.data(), buffer.size(), from, 100);
+            Header header;
+            if (size > 0 && ReadHeader(buffer.data(), static_cast<size_t>(size), header) >= 0 &&
+                header.type == Type::Punch) {
+                return true;
+            }
+        }
+        return false;
+    };
+    until = NowMs() + 16000;
+    while (NowMs() < until && next_punch(800)) {
+    }
+    const int64_t asked_again = NowMs();
+    account.RequestConnect(token, "1122334455667788", "aabbccddeeff0011", "Switch teste",
+                           switch_address, {switch_address});
+    const bool fast = next_punch(5000);
+    Check(fast && NowMs() - asked_again < 2500,
+          "com o Switch procurando, o caminho abre em " + std::to_string(NowMs() - asked_again) +
+              " ms");
+    presence.Stop();
+    host.Stop();
+    if (upnp) {
+        Check(Fetch("http://127.0.0.1:5431/mappings") == "{}", "a porta do roteador fecha ao sair");
     }
 }
 
@@ -504,6 +655,12 @@ int main(int argc, char** argv) {
         StreamTests(keys, other, quick);
     }
     AccountTests(keys, other);
+    if (std::getenv("CHARIS_UPNP_TEST")) {
+        UpnpTests();
+    }
+    if (const char* server = std::getenv("CHARIS_ACCOUNT_URL")) {
+        PresenceTests(keys, server);
+    }
     std::printf(failures == 0 ? "\nTUDO CERTO\n" : "\n%d FALHA(S)\n", failures);
     return failures == 0 ? 0 : 1;
 }

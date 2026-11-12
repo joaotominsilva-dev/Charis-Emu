@@ -12,23 +12,23 @@ include $(DEVKITPRO)/libnx/switch_rules
 
 APP_TITLE   := Charis Stream
 APP_AUTHOR  := Charis
-APP_VERSION := 1.0.0
+APP_VERSION := 2.0.0
 ICON        := icon.jpg
 
 TARGET      := charis-stream
 BUILD       := build
-SOURCES     := source
+SOURCES     := source ../../src/charis_stream ../../src/charis_stream/third_party
 DATA        := data
 INCLUDES    := include ../../src
 ROMFS       := romfs
 
 PKGCONF     := $(DEVKITPRO)/portlibs/switch/bin/aarch64-none-elf-pkg-config
-PKGS        := SDL2_ttf SDL2_gfx sdl2 libavcodec libavutil opus
+PKGS        := SDL2_ttf SDL2_gfx sdl2 libavcodec libavutil opus libcurl
 
 ARCH        := -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
 CFLAGS      := -g -Wall -O2 -ffunction-sections $(ARCH) $(DEFINES)
 CFLAGS      += $(INCLUDE) -D__SWITCH__ $(shell $(PKGCONF) --cflags $(PKGS))
-CXXFLAGS    := $(CFLAGS) -std=gnu++17 -fno-rtti -fno-exceptions
+CXXFLAGS    := $(CFLAGS) -std=gnu++20 -fno-rtti
 ASFLAGS     := -g $(ARCH)
 LDFLAGS      = -specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 LIBS        := $(shell $(PKGCONF) --libs $(PKGS)) -lnx
@@ -43,7 +43,9 @@ export VPATH    := $(foreach dir,$(SOURCES),$(CURDIR)/$(dir)) $(foreach dir,$(DA
 export DEPSDIR  := $(CURDIR)/$(BUILD)
 
 CFILES      := $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.c)))
-CPPFILES    := $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.cpp)))
+# The PC-only parts of the stream core stay out of the Switch app
+PC_ONLY     := host.cpp presence.cpp upnp.cpp windows_sources.cpp windows_input.cpp windows_http.cpp
+CPPFILES    := $(filter-out $(PC_ONLY),$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.cpp))))
 export LD   := $(CXX)
 export OFILES_SRC := $(CPPFILES:.cpp=.o) $(CFILES:.c=.o)
 export OFILES     := $(OFILES_SRC)

@@ -9,6 +9,7 @@
 #include <QLabel>
 #include <QLocale>
 #include <QPushButton>
+#include <QStyle>
 #include <QSignalBlocker>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -51,11 +52,11 @@ CharisHeader::CharisHeader(QWidget* parent) : QWidget(parent) {
 
     stream_button = new QPushButton(body);
     stream_button->setObjectName(QStringLiteral("CharisPillButton"));
-    stream_button->setCheckable(true);
     stream_button->setCursor(Qt::PointingHandCursor);
     stream_button->setFocusPolicy(Qt::NoFocus);
-    stream_button->setToolTip(QStringLiteral("Mostrar o jogo no Switch com o app Charis Stream"));
-    connect(stream_button, &QPushButton::toggled, this, &CharisHeader::StreamToggled);
+    stream_button->setToolTip(
+        QStringLiteral("Jogar no Switch com o app Charis Stream: entre na mesma conta nos dois"));
+    connect(stream_button, &QPushButton::clicked, this, &CharisHeader::StreamClicked);
     top_row->addWidget(stream_button);
     SetStreamState(0);
 
@@ -155,19 +156,23 @@ void CharisHeader::SetStreamAvailable(bool available) {
 }
 
 void CharisHeader::SetStreamState(int state) {
-    const QSignalBlocker blocker(stream_button);
-    stream_button->setChecked(state != 0);
     switch (state) {
     case 1:
-        stream_button->setText(QStringLiteral("Esperando o Switch..."));
+        stream_button->setText(QStringLiteral("Switch: pronto"));
         break;
     case 2:
-        stream_button->setText(QStringLiteral("Transmitindo para o Switch"));
+        stream_button->setText(QStringLiteral("Jogando no Switch"));
+        break;
+    case 3:
+        stream_button->setText(QStringLiteral("Switch: ver conta"));
         break;
     default:
-        stream_button->setText(QStringLiteral("Transmitir para o Switch"));
+        stream_button->setText(QStringLiteral("Jogar no Switch"));
         break;
     }
+    stream_button->setProperty("active", state == 2);
+    stream_button->style()->unpolish(stream_button);
+    stream_button->style()->polish(stream_button);
 }
 
 void CharisHeader::SetShowHidden(bool show) {

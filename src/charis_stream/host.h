@@ -67,6 +67,9 @@ public:
     bool IsStreaming() const {
         return session_active;
     }
+    uint16_t Port() const {
+        return socket.Port();
+    }
 
     // Where a Switch can reach this PC: on the home network, and from the internet (the latter
     // is known a moment after Start, once a STUN server answered; not valid until then).

@@ -51,6 +51,9 @@
 #include "yuzu/charis_header.h"
 #include "yuzu/charis_updater.h"
 #include "yuzu/charis_stream_controller.h"
+#include "yuzu/charis_account.h"
+#include "charis_stream/account.h"
+#include "charis_stream/sources.h"
 #include "input_common/drivers/sdl_merge.h"
 #include "yuzu/game_clock_dialog.h"
 #include "yuzu/game/game_list.h"
@@ -1019,29 +1022,80 @@ void MainWindow::InitializeWidgets() {
     ui->menu_Emulation->addAction(game_clock_action);
 
     charis_stream = new CharisStreamController(input_subsystem, *QtCommon::system, this);
-    auto* stream_action = new QAction(QStringLiteral("Transmitir para o Switch"), this);
-    stream_action->setCheckable(true);
-    const auto set_streaming = [this, stream_action](bool on) {
-        if (on) {
-            QString error;
-            if (!charis_stream->Start(error)) {
-                QMessageBox::warning(this, QStringLiteral("Charis Stream"), error);
-                on = false;
+    // While the account is logged in, the PC waits for the Switch app on its own: no button
+    // to press, no IP to type. The header pill shows how it stands and opens the account.
+    const auto update_stream_pill = [this] {
+        const CharisAccountData account = CharisAccountStore::Load();
+        int state = 0;
+        if (account.IsLoggedIn()) {
+            const auto status = charis_stream->PresenceStatus();
+            if (charis_stream->IsStreaming()) {
+                state = 2;
+            } else if (status.login_expired) {
+                state = 3;
+            } else {
+                state = 1;
             }
-        } else {
-            charis_stream->Stop();
         }
-        const QSignalBlocker blocker(stream_action);
-        stream_action->setChecked(on);
-        charis_header->SetStreamState(on ? 1 : 0);
+        charis_header->SetStreamState(state);
     };
-    connect(stream_action, &QAction::toggled, this, set_streaming);
-    connect(charis_header, &CharisHeader::StreamToggled, this, set_streaming);
-    connect(charis_stream, &CharisStreamController::SessionChanged, this,
-            [this](bool connected, const QString&) {
-                if (charis_stream->IsRunning()) {
-                    charis_header->SetStreamState(connected ? 2 : 1);
+    const auto start_stream = [this, update_stream_pill] {
+        charis_stream->Stop();
+        const CharisAccountData account = CharisAccountStore::Load();
+        if (account.IsLoggedIn() && CharisAccountStore::Available()) {
+            QString error;
+            if (!charis_stream->Start(account, CharisAccountStore::PcName(),
+                                      CharisAccountStore::HostId(), error)) {
+                LOG_WARNING(Frontend, "Charis Stream: {}", error.toStdString());
+            }
+        }
+        update_stream_pill();
+    };
+    const auto open_account = [this, start_stream, update_stream_pill] {
+        CharisAccountDialog dialog(charis_stream, this);
+        connect(&dialog, &CharisAccountDialog::LoggedIn, this,
+                [start_stream](const CharisAccountData&) { start_stream(); });
+        connect(&dialog, &CharisAccountDialog::AvailabilityChanged, this,
+                [start_stream](bool) { start_stream(); });
+        connect(&dialog, &CharisAccountDialog::PcNameChanged, this,
+                [start_stream](const QString&) { start_stream(); });
+        connect(&dialog, &CharisAccountDialog::LoggedOut, this, [this, update_stream_pill] {
+            const CharisAccountData account = CharisAccountStore::Load();
+            charis_stream->Stop();
+            CharisAccountStore::Clear();
+            // Take this PC off the account's list without making the user wait
+            const QString host_id = CharisAccountStore::HostId();
+            (void)QtConcurrent::run([token = account.token.toStdString(),
+                                     id = host_id.toStdString()] {
+                if (auto http = CharisStream::MakeSystemHttp()) {
+                    CharisStream::Account{*http}.HostRemove(token, id);
                 }
+            });
+            update_stream_pill();
+        });
+        dialog.exec();
+        update_stream_pill();
+    };
+    auto* stream_action = new QAction(QStringLiteral("Jogar no Switch..."), this);
+    connect(stream_action, &QAction::triggered, this, open_account);
+    connect(charis_header, &CharisHeader::StreamClicked, this, open_account);
+    connect(charis_stream, &CharisStreamController::PresenceChanged, this, update_stream_pill);
+    connect(charis_stream, &CharisStreamController::LoginExpired, this, update_stream_pill);
+    connect(charis_stream, &CharisStreamController::SessionChanged, this,
+            [this, update_stream_pill](bool connected, const QString&) {
+                update_stream_pill();
+                if (connected) {
+                    // The Switch sees the main monitor: put Charis Switch in front of it
+                    if (isMinimized()) {
+                        showMaximized();
+                    }
+                    raise();
+                    activateWindow();
+                }
+            });
+    connect(charis_stream, &CharisStreamController::TouchesChanged, this,
+            [this](const QList<QPointF>& points, const QList<int>& ids) {
+                render_window->ApplyStreamTouches(points, ids);
             });
     connect(charis_stream, &CharisStreamController::GoHomeRequested, this, [this] {
         // Same as Stop, without the confirmation: the request comes from the Switch app
@@ -1058,15 +1112,12 @@ void MainWindow::InitializeWidgets() {
         activateWindow();
     });
     connect(charis_stream, &CharisStreamController::ErrorRaised, this,
-            [this](const QString& message) {
-                QMessageBox::warning(this, QStringLiteral("Charis Stream"), message);
+            [](const QString& message) {
+                LOG_WARNING(Frontend, "Charis Stream: {}", message.toStdString());
             });
-    // Charis Stream stays out of sight until it has been tested end to end
-    constexpr bool charis_stream_ready = false;
-    charis_header->SetStreamAvailable(charis_stream_ready);
-    if (charis_stream_ready) {
-        ui->menu_Emulation->addAction(stream_action);
-    }
+    charis_header->SetStreamAvailable(true);
+    ui->menu_Emulation->addAction(stream_action);
+    QTimer::singleShot(0, this, start_stream);
 
     auto* smooth_action = new QAction(QStringLiteral("Ativar modo fluido"), this);
     connect(smooth_action, &QAction::triggered, this, [this] {

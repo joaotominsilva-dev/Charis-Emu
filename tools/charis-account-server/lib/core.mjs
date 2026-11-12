@@ -19,6 +19,12 @@ const HOST_ONLINE_MS = 45_000;
 const REQUEST_TTL_MS = 30_000;
 const MAX_HOSTS = 8;
 const MAX_REQUESTS = 8;
+// The PC asks again after POLL_IDLE_MS, or POLL_FAST_MS while a Switch of the account was
+// looking at its PC list in the last LOOKING_MS: connecting feels instant without spending
+// the free function quota on a PC that nobody is looking for.
+const POLL_IDLE_MS = 10_000;
+const POLL_FAST_MS = 1_500;
+const LOOKING_MS = 90_000;
 
 const ok = (fields = {}) => ({ status: 200, fields: { ok: '1', ...fields } });
 const fail = (status, error) => ({ status, fields: { error } });
@@ -117,6 +123,8 @@ export function createApi(store) {
       }
 
       const fields = {};
+      const looking = await store.get(`looking/${user}`);
+      fields.next = String(looking && now - looking.at < LOOKING_MS ? POLL_FAST_MS : POLL_IDLE_MS);
       let n = 0;
       for (const requestKey of await store.list(`req/${user}/${p.host_id}/`)) {
         const request = await store.get(requestKey);
@@ -144,6 +152,10 @@ export function createApi(store) {
       const user = await userFromToken(p.token);
       if (!user) return fail(401, 'auth');
       const now = Date.now();
+      const looking = await store.get(`looking/${user}`);
+      if (!looking || now - looking.at > 20_000) {
+        await store.set(`looking/${user}`, { at: now });
+      }
       const fields = {};
       let n = 0;
       for (const key of await store.list(`host/${user}/`)) {
@@ -171,8 +183,10 @@ export function createApi(store) {
         return fail(400, 'invalid');
       }
       if (!(await store.get(`host/${user}/${p.host_id}`))) return fail(404, 'nohost');
+      const now = Date.now();
       await store.set(`req/${user}/${p.host_id}/${p.client_id}`,
-        { name: cleanName(p.name, 32) || 'Switch', public: pub, local, at: Date.now() });
+        { name: cleanName(p.name, 32) || 'Switch', public: pub, local, at: now });
+      await store.set(`looking/${user}`, { at: now });
       return ok();
     },
   };

@@ -28,14 +28,14 @@ public:
     void SetHiddenCount(int count);
     void SetShowHidden(bool show);
     void SetUpdateAvailable(const QString& version);
-    // 0 off, 1 waiting for the Switch, 2 streaming
+    // 0 not logged in, 1 ready for the Switch, 2 streaming, 3 needs attention
     void SetStreamState(int state);
     void SetStreamAvailable(bool available);
 
 signals:
     void GameClockClicked();
     void UpdateClicked();
-    void StreamToggled(bool on);
+    void StreamClicked();
     void ShowHiddenToggled(bool show);
 
 protected:

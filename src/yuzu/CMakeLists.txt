@@ -223,9 +223,18 @@ add_executable(yuzu
     charis_updater.h charis_updater.cpp
     charis_version.h
     charis_stream_controller.h charis_stream_controller.cpp
+    charis_account.h charis_account.cpp
     ../charis_stream/protocol.h
+    ../charis_stream/crypto.h ../charis_stream/crypto.cpp
+    ../charis_stream/net.h ../charis_stream/net.cpp
+    ../charis_stream/fec.h ../charis_stream/fec.cpp
     ../charis_stream/host.h ../charis_stream/host.cpp
+    ../charis_stream/account.h ../charis_stream/account.cpp
+    ../charis_stream/presence.h ../charis_stream/presence.cpp
+    ../charis_stream/upnp.h ../charis_stream/upnp.cpp
     ../charis_stream/sources.h ../charis_stream/windows_sources.cpp
+    ../charis_stream/windows_input.cpp ../charis_stream/windows_http.cpp
+    ../charis_stream/third_party/monocypher.h ../charis_stream/third_party/monocypher.c
 
     yuzu.qrc
     yuzu.rc
@@ -443,7 +452,7 @@ target_link_libraries(yuzu PRIVATE Boost::headers Qt6::Widgets Qt6::Charts Qt6::
 target_include_directories(yuzu PRIVATE ${FFmpeg_INCLUDE_DIR} ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(yuzu PRIVATE ${FFmpeg_LIBRARIES} Opus::opus)
 if (WIN32)
-    target_link_libraries(yuzu PRIVATE ws2_32 ole32 uuid d3d11 dxgi)
+    target_link_libraries(yuzu PRIVATE ws2_32 ole32 uuid d3d11 dxgi winhttp crypt32 bcrypt)
 endif()
 if (TARGET ffmpeg-build)
     add_dependencies(yuzu ffmpeg-build)

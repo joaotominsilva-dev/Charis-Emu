@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: 2026 Charis
+# SPDX-License-Identifier: GPL-3.0-or-later
+# The Switch app built for Linux, to test it on a PC: make -f Makefile.linux
+
+CORE := ../../src/charis_stream
+SOURCES := $(wildcard source/*.cpp) $(CORE)/crypto.cpp $(CORE)/net.cpp $(CORE)/client.cpp \
+	$(CORE)/account.cpp $(CORE)/fec.cpp
+PKGS := sdl2 SDL2_ttf SDL2_gfx libavcodec libavutil opus libcurl
+CXXFLAGS ?= -O2 -g -Wall
+CXXFLAGS += -std=c++20 -I../../src $(shell pkg-config --cflags $(PKGS)) -pthread
+
+charis-stream-linux: $(SOURCES) monocypher.o $(wildcard source/*.h) $(wildcard $(CORE)/*.h)
+	$(CXX) $(CXXFLAGS) $(SOURCES) monocypher.o -o $@ $(shell pkg-config --libs $(PKGS))
+
+monocypher.o: $(CORE)/third_party/monocypher.c
+	$(CC) -O2 -c $< -o $@
+
+clean:
+	rm -f charis-stream-linux monocypher.o

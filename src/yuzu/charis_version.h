@@ -4,4 +4,4 @@
 #pragma once
 
 // Version of Charis Switch, used by the About screen, the updater and the installer name.
-#define CHARIS_SWITCH_VERSION "1.1.4"
+#define CHARIS_SWITCH_VERSION "1.2.0"

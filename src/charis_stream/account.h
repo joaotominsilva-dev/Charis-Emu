@@ -13,6 +13,8 @@ namespace CharisStream {
 
 // Where the Charis account server lives
 constexpr char AccountServerUrl[] = "https://charis-conta.netlify.app/api/";
+// AccountServerUrl, or the CHARIS_ACCOUNT_URL environment variable when set (for testing)
+std::string DefaultServerUrl();
 
 // How each app makes an HTTPS request (libcurl on the Switch, Qt on the PC).
 class Http {
@@ -41,15 +43,17 @@ struct ConnectRequest {
 // Portuguese that can be shown to the user as it is.
 class Account {
 public:
-    explicit Account(Http& http, std::string base_url = AccountServerUrl);
+    explicit Account(Http& http, std::string base_url = DefaultServerUrl());
 
     std::string Register(const std::string& user, const std::string& auth_hex, std::string& token);
     std::string Login(const std::string& user, const std::string& auth_hex, std::string& token);
 
-    // PC: keep its addresses up to date and collect the Switches asking to connect
+    // PC: keep its addresses up to date and collect the Switches asking to connect.
+    // next_poll_ms: when to call again (sooner while a Switch of the account is looking).
     std::string HostPoll(const std::string& token, const std::string& host_id,
                          const std::string& name, const std::vector<Address>& local,
-                         const Address& public_address, std::vector<ConnectRequest>& requests);
+                         const Address& public_address, std::vector<ConnectRequest>& requests,
+                         int& next_poll_ms);
     std::string HostRemove(const std::string& token, const std::string& host_id);
 
     // Switch: the PCs of the account, and asking one of them to open the way

@@ -80,6 +80,9 @@ public:
 
     std::pair<u32, u32> ScaleTouch(const QPointF& pos) const;
 
+    // Fingers on the Switch screen from Charis Stream: 0..1 across the PC's main monitor
+    void ApplyStreamTouches(const QList<QPointF>& points, const QList<int>& ids);
+
     void closeEvent(QCloseEvent* event) override;
     void leaveEvent(QEvent* event) override;
 

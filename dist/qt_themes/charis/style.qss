@@ -1260,7 +1260,8 @@ QPushButton#CharisPillButton:hover {
     color: #F3F4EA;
 }
 
-QPushButton#CharisPillButton:checked {
+QPushButton#CharisPillButton:checked,
+QPushButton#CharisPillButton[active="true"] {
     background-color: #F3F4EA;
     color: #1D1E19;
 }
@@ -1444,6 +1445,55 @@ QDialog#CharisUpdateDialog QLabel#DialogPreview[error="true"] {
 }
 
 QDialog#CharisUpdateDialog QPushButton#SecondaryButton {
+    background-color: #E9EADD;
+    color: #1D1E19;
+}
+
+QDialog#CharisAccountDialog QLabel#DialogEyebrow {
+    color: #55564B;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 2px;
+}
+
+QDialog#CharisAccountDialog QLabel#DialogTitle {
+    color: #1D1E19;
+    font-size: 26px;
+    font-weight: 800;
+}
+
+QDialog#CharisAccountDialog QLabel#DialogText {
+    color: #55564B;
+    font-size: 14px;
+}
+
+QDialog#CharisAccountDialog QLabel#DialogPreview {
+    background-color: #20211C;
+    color: #F3F4EA;
+    border-radius: 16px;
+    padding: 14px 18px;
+    font-size: 14px;
+    font-weight: 700;
+}
+
+QDialog#CharisAccountDialog QLabel#DialogPreview[error="true"] {
+    background-color: #953521;
+}
+
+QDialog#CharisAccountDialog QLineEdit {
+    font-size: 16px;
+    padding: 10px 14px;
+}
+
+QDialog#CharisAccountDialog QCheckBox {
+    background-color: #E9EADD;
+    border-radius: 16px;
+    padding: 14px 16px;
+    font-size: 15px;
+    font-weight: 700;
+}
+
+QDialog#CharisAccountDialog QPushButton#SecondaryButton {
     background-color: #E9EADD;
     color: #1D1E19;
 }

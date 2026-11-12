@@ -32,13 +32,7 @@ namespace {
 constexpr uint32_t StunCookie = 0x2112A442;
 
 void EnsureSockets() {
-#ifdef _WIN32
-    static const bool started = [] {
-        WSADATA wsa;
-        return WSAStartup(MAKEWORD(2, 2), &wsa) == 0;
-    }();
-    (void)started;
-#endif
+    InitSockets();
 }
 
 sockaddr_in ToSockaddr(const Address& address) {
@@ -50,6 +44,16 @@ sockaddr_in ToSockaddr(const Address& address) {
 }
 
 } // namespace
+
+void InitSockets() {
+#ifdef _WIN32
+    static const bool started = [] {
+        WSADATA wsa;
+        return WSAStartup(MAKEWORD(2, 2), &wsa) == 0;
+    }();
+    (void)started;
+#endif
+}
 
 int64_t NowMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(

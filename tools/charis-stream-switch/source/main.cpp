@@ -1,768 +1,1165 @@
 // SPDX-FileCopyrightText: 2026 Charis
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// Charis Stream for Nintendo Switch (homebrew). Finds Charis Switch on the PC, shows its screen,
-// plays its sound and sends the controller back. Also builds on Linux for testing.
+// Charis Stream for Nintendo Switch (homebrew). Log in once with the Charis account; the app
+// lists the PCs of that account running Charis Switch, at home or away, and plays them:
+// picture and sound from the PC, controller, touch, mouse and keyboard back to it.
+// Also builds on Linux for testing.
 
 #include <algorithm>
+#include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
-#include <arpa/inet.h>
-#include <fcntl.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <unistd.h>
-
 #include <SDL2/SDL.h>
-#include <SDL2/SDL2_gfxPrimitives.h>
 #include <SDL2/SDL_ttf.h>
-#include <opus/opus.h>
 
-extern "C" {
-#include <libavcodec/avcodec.h>
-#include <libavutil/hwcontext.h>
-#include <libavutil/imgutils.h>
-}
-
-#ifdef __SWITCH__
-#include <switch.h>
-#endif
-
-#include "charis_stream/protocol.h"
+#include "charis_stream/account.h"
+#include "charis_stream/client.h"
+#include "charis_stream/crypto.h"
+#include "input.h"
+#include "media.h"
+#include "platform.h"
+#include "ui.h"
 
 using namespace CharisStream;
 
 namespace {
 
-// ---------- Charis palette ----------
-struct Color {
-    Uint8 r, g, b, a;
-};
-constexpr Color Charcoal{0x20, 0x21, 0x1C, 255};
-constexpr Color Charcoal2{0x2C, 0x2D, 0x27, 255};
-constexpr Color Cream{0xF3, 0xF4, 0xEA, 255};
-constexpr Color Cream2{0xE9, 0xEA, 0xDD, 255};
-constexpr Color SageLight{0xC8, 0xC9, 0xB7, 255};
-constexpr Color Ink{0x1D, 0x1E, 0x19, 255};
-constexpr Color InkSoft{0x55, 0x56, 0x4B, 255};
-constexpr Color OnDarkSoft{0xA9, 0xAA, 0x98, 255};
-constexpr Color Danger{0x95, 0x35, 0x21, 255};
-
-constexpr int ScreenW = 1280;
-constexpr int ScreenH = 720;
-
-int64_t NowMs() {
+int64_t Now() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
                std::chrono::steady_clock::now().time_since_epoch())
         .count();
 }
 
-// ---------- Drawing ----------
-struct Ui {
-    SDL_Renderer* renderer = nullptr;
-    TTF_Font* title = nullptr;
-    TTF_Font* body = nullptr;
-    TTF_Font* small = nullptr;
-    TTF_Font* bold = nullptr;
+// One account call at a time off the screen thread; its result is applied on the screen thread.
+class Background {
+public:
+    ~Background() {
+        if (thread.joinable()) {
+            thread.join();
+        }
+    }
+    bool Busy() const {
+        return busy;
+    }
+    void Run(std::function<std::function<void()>()> job) {
+        if (busy) {
+            return;
+        }
+        if (thread.joinable()) {
+            thread.join();
+        }
+        busy = true;
+        thread = std::thread([this, job] {
+            std::function<void()> apply = job();
+            {
+                std::scoped_lock lock{mutex};
+                results.push_back(std::move(apply));
+            }
+            busy = false;
+        });
+    }
+    void ApplyResults() {
+        std::vector<std::function<void()>> ready;
+        {
+            std::scoped_lock lock{mutex};
+            ready.swap(results);
+        }
+        for (auto& apply : ready) {
+            if (apply) {
+                apply();
+            }
+        }
+    }
 
-    void Fill(Color c) {
-        SDL_SetRenderDrawColor(renderer, c.r, c.g, c.b, c.a);
-        SDL_RenderClear(renderer);
-    }
-    void Box(int x, int y, int w, int h, int radius, Color c) {
-        roundedBoxRGBA(renderer, x, y, x + w - 1, y + h - 1, radius, c.r, c.g, c.b, c.a);
-    }
-    // Returns the text width
-    int Text(TTF_Font* font, const std::string& text, int x, int y, Color c, bool center = false) {
-        if (text.empty()) {
-            return 0;
-        }
-        SDL_Surface* surface = TTF_RenderUTF8_Blended(font, text.c_str(), SDL_Color{c.r, c.g, c.b, c.a});
-        if (surface == nullptr) {
-            return 0;
-        }
-        SDL_Texture* texture = SDL_CreateTextureFromSurface(renderer, surface);
-        SDL_Rect rect{center ? x - surface->w / 2 : x, y, surface->w, surface->h};
-        SDL_RenderCopy(renderer, texture, nullptr, &rect);
-        const int width = surface->w;
-        SDL_DestroyTexture(texture);
-        SDL_FreeSurface(surface);
-        return width;
-    }
-    void Hint(int x, int y, const char* button, const std::string& label, bool dark) {
-        const Color pill = dark ? SageLight : Charcoal;
-        const Color glyph = dark ? Charcoal : Cream;
-        filledCircleRGBA(renderer, x + 14, y + 14, 14, pill.r, pill.g, pill.b, 255);
-        Text(bold, button, x + 14, y + 2, glyph, true);
-        Text(body, label, x + 38, y + 1, dark ? Cream : Ink);
-    }
+private:
+    std::thread thread;
+    std::atomic<bool> busy{false};
+    std::mutex mutex;
+    std::vector<std::function<void()>> results;
 };
 
-// ---------- Network ----------
-struct Net {
-    int fd = -1;
+enum class Screen { Login, Hosts, Connecting, Streaming, Message };
 
-    bool Open() {
-        fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-        if (fd < 0) {
-            return false;
-        }
-        const int yes = 1;
-        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
-        setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &yes, sizeof(yes));
-        const int buffer = 4 * 1024 * 1024;
-        setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &buffer, sizeof(buffer));
-        sockaddr_in address{};
-        address.sin_family = AF_INET;
-        address.sin_addr.s_addr = htonl(INADDR_ANY);
-        address.sin_port = htons(ClientPort);
-        if (bind(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
-            return false;
-        }
-        fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
-        return true;
-    }
-
-    void Send(uint32_t ip, Type type, const void* body = nullptr, size_t size = 0) {
-        uint8_t packet[256];
-        const size_t offset = WriteHeader(packet, type);
-        if (body != nullptr && size > 0) {
-            std::memcpy(packet + offset, body, size);
-        }
-        sockaddr_in to{};
-        to.sin_family = AF_INET;
-        to.sin_addr.s_addr = ip;
-        to.sin_port = htons(HostPort);
-        sendto(fd, packet, offset + size, 0, reinterpret_cast<sockaddr*>(&to), sizeof(to));
-    }
-};
-
-struct HostInfo {
-    uint32_t ip = 0;
+struct Entry {
+    std::string id;
     std::string name;
-    int64_t seen_ms = 0;
+    std::vector<Address> addresses;
+    bool home = false;   // answered on this network
+    bool online = false; // the account server saw it in the last minute
 };
 
-std::string IpText(uint32_t ip) {
-    char text[INET_ADDRSTRLEN] = {};
-    in_addr address{};
-    address.s_addr = ip;
-    inet_ntop(AF_INET, &address, text, sizeof(text));
-    return text;
+constexpr const char* QualityNames[] = {"Automática", "Máxima", "Leve"};
+
+class App {
+public:
+    int Run();
+
+private:
+    // Screens
+    void LoginFrame(uint64_t pressed);
+    void HostsFrame(uint64_t pressed);
+    void ConnectingFrame(uint64_t pressed);
+    void StreamingFrame(const PadSnapshot& pad, uint64_t pressed, int dt_ms);
+    void MessageFrame(uint64_t pressed);
+    void DrawLogin();
+    void DrawHosts();
+    void DrawConnecting();
+    void DrawStreaming();
+    void DrawMenu();
+    void DrawMessage();
+
+    // Actions
+    void SubmitLogin();
+    void LoggedIn(const std::string& user, const std::string& token, const Key32& key);
+    void Logout(const std::string& why);
+    void RefreshHosts();
+    void BuildEntries();
+    void Connect(const Entry& entry);
+    void SendConnectRequest();
+    void StopStreaming(const std::string& title, const std::string& why);
+    void MenuChoose();
+    void Toast(const std::string& text, int ms = 2500);
+    uint32_t BitrateFor(bool home) const;
+    bool Tapped(const Rect& rect) const;
+
+    Ui ui;
+    SDL_Window* window = nullptr;
+    int output_w = ScreenW;
+    int output_h = ScreenH;
+    Pads pads;
+    VideoDecoder video;
+    AudioPlayer audio;
+    Platform::Saved saved;
+    std::unique_ptr<Http> http;
+    std::unique_ptr<Client> client;
+    Key32 key{};
+    Background background;
+    Screen screen = Screen::Login;
+    int64_t now = 0;
+    bool quit = false;
+
+    // Touch taps on the interface (not the stream)
+    bool was_touching = false;
+    int tap_x = -1;
+    int tap_y = -1;
+
+    // Login
+    std::string form_user;
+    std::string form_password;
+    bool form_create = false;
+    int login_focus = 0; // 0 user, 1 password, 2 submit, 3 switch mode
+    std::string login_error;
+    Rect user_rect, password_rect, submit_rect, mode_rect;
+
+    // PC list
+    std::vector<HostEntry> server_hosts;
+    std::vector<Entry> entries;
+    int selected = 0;
+    int64_t last_list_ms = -100000;
+    bool list_loaded = false;
+    std::string list_error;
+    bool auto_connect_done = false;
+    int64_t list_ready_ms = 0;
+    bool user_moved = false;
+    bool confirm_logout = false;
+    std::vector<Rect> entry_rects;
+
+    // Connection
+    Entry target;
+    int64_t connect_started = 0;
+    bool request_sent_with_public = false;
+
+    // Stream
+    bool desktop = false;
+    bool menu_open = false;
+    int menu_choice = 0;
+    bool show_stats = false;
+    DesktopPointer pointer;
+    KeyQueue keys;
+    uint64_t previous_buttons = 0;
+    int home_frames = 0;
+    int64_t combo_since = 0;
+    bool combo_latched = false;
+    std::string toast;
+    int64_t toast_until = 0;
+    int64_t help_until = 0;
+
+    // Message
+    std::string message_title;
+    std::string message_text;
+};
+
+bool App::Tapped(const Rect& rect) const {
+    return tap_x >= 0 && rect.Contains(tap_x, tap_y);
 }
 
-// ---------- Video ----------
-struct Video {
-    AVCodecContext* codec = nullptr;
-    AVFrame* frame = nullptr;
-    AVFrame* sw_frame = nullptr;
-    AVPacket* packet = nullptr;
-    SDL_Texture* texture = nullptr;
-    int texture_format = -1;
-    int texture_w = 0;
-    int texture_h = 0;
-    bool has_picture = false;
+void App::Toast(const std::string& text, int ms) {
+    toast = text;
+    toast_until = now + ms;
+}
 
-    // Reassembly of the frame being received
-    uint32_t current = 0;
-    bool receiving = false;
-    std::vector<uint8_t> data;
-    std::vector<uint8_t> got;
-    uint16_t missing = 0;
-    bool keyframe = false;
-    bool waiting_keyframe = true;
-    int64_t last_request_ms = 0;
-    uint32_t frames_shown = 0;
+uint32_t App::BitrateFor(bool home) const {
+    const bool big = output_h >= 1080;
+    uint32_t kbps = home ? (big ? 25000 : 15000) : (big ? 14000 : 10000);
+    if (saved.quality == 1) {
+        kbps = kbps * 8 / 5;
+    } else if (saved.quality == 2) {
+        kbps = big ? 9000 : 6000;
+    }
+    return kbps;
+}
 
-    static enum AVPixelFormat PickFormat(AVCodecContext*, const enum AVPixelFormat* formats) {
-#ifdef __SWITCH__
-        for (const enum AVPixelFormat* f = formats; *f != AV_PIX_FMT_NONE; ++f) {
-            if (*f == AV_PIX_FMT_NVTEGRA) {
-                return *f;
+// ---------- Login ----------
+
+void App::SubmitLogin() {
+    if (background.Busy()) {
+        return;
+    }
+    std::string user;
+    for (const char c : form_user) {
+        if (c != ' ') {
+            user += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+    }
+    if (user.size() < 3) {
+        login_error = "Digite seu usuário (o mesmo do Charis Switch no PC).";
+        login_focus = 0;
+        return;
+    }
+    if (form_password.size() < 6) {
+        login_error = "A senha tem pelo menos 6 caracteres.";
+        login_focus = 1;
+        return;
+    }
+    login_error.clear();
+    const std::string password = form_password;
+    const bool create = form_create;
+    background.Run([this, user, password, create]() -> std::function<void()> {
+        const AccountKeys keys_made = DeriveAccountKeys(user, password);
+        Account account{*http};
+        std::string token;
+        const std::string error = create ? account.Register(user, keys_made.auth_hex, token)
+                                         : account.Login(user, keys_made.auth_hex, token);
+        return [this, error, user, token, keys_made] {
+            if (!error.empty()) {
+                login_error = error;
+                return;
             }
-        }
-#endif
-        return formats[0];
-    }
-
-    bool Open() {
-        const AVCodec* decoder = avcodec_find_decoder(AV_CODEC_ID_H264);
-        codec = avcodec_alloc_context3(decoder);
-        codec->flags |= AV_CODEC_FLAG_LOW_DELAY;
-        codec->flags2 |= AV_CODEC_FLAG2_FAST;
-#ifdef __SWITCH__
-        // Hardware decoding on the Switch's own video chip
-        AVBufferRef* device = nullptr;
-        if (av_hwdevice_ctx_create(&device, AV_HWDEVICE_TYPE_NVTEGRA, nullptr, nullptr, 0) == 0) {
-            codec->hw_device_ctx = device;
-            codec->get_format = PickFormat;
-        }
-#else
-        codec->thread_count = 4;
-        codec->thread_type = FF_THREAD_SLICE;
-#endif
-        if (avcodec_open2(codec, decoder, nullptr) < 0) {
-            return false;
-        }
-        frame = av_frame_alloc();
-        sw_frame = av_frame_alloc();
-        packet = av_packet_alloc();
-        return true;
-    }
-
-    // Returns true when a new picture is ready in the texture.
-    bool Decode(SDL_Renderer* renderer, const std::vector<uint8_t>& bytes) {
-        av_packet_unref(packet);
-        if (av_new_packet(packet, static_cast<int>(bytes.size())) < 0) {
-            return false;
-        }
-        std::memcpy(packet->data, bytes.data(), bytes.size());
-        if (avcodec_send_packet(codec, packet) < 0) {
-            return false;
-        }
-        bool updated = false;
-        while (avcodec_receive_frame(codec, frame) == 0) {
-            AVFrame* picture = frame;
-            if (frame->hw_frames_ctx != nullptr) {
-                av_frame_unref(sw_frame);
-                if (av_hwframe_transfer_data(sw_frame, frame, 0) < 0) {
-                    av_frame_unref(frame);
-                    continue;
-                }
-                picture = sw_frame;
-            }
-            updated = Upload(renderer, picture) || updated;
-            av_frame_unref(frame);
-        }
-        return updated;
-    }
-
-    bool Upload(SDL_Renderer* renderer, AVFrame* picture) {
-        const bool nv12 = picture->format == AV_PIX_FMT_NV12;
-        const int format = nv12 ? SDL_PIXELFORMAT_NV12 : SDL_PIXELFORMAT_IYUV;
-        if (!nv12 && picture->format != AV_PIX_FMT_YUV420P && picture->format != AV_PIX_FMT_YUVJ420P) {
-            return false;
-        }
-        if (texture == nullptr || texture_format != format || texture_w != picture->width ||
-            texture_h != picture->height) {
-            if (texture != nullptr) {
-                SDL_DestroyTexture(texture);
-            }
-            texture = SDL_CreateTexture(renderer, format, SDL_TEXTUREACCESS_STREAMING,
-                                        picture->width, picture->height);
-            texture_format = format;
-            texture_w = picture->width;
-            texture_h = picture->height;
-        }
-        if (nv12) {
-            SDL_UpdateNVTexture(texture, nullptr, picture->data[0], picture->linesize[0],
-                                picture->data[1], picture->linesize[1]);
-        } else {
-            SDL_UpdateYUVTexture(texture, nullptr, picture->data[0], picture->linesize[0],
-                                 picture->data[1], picture->linesize[1], picture->data[2],
-                                 picture->linesize[2]);
-        }
-        has_picture = true;
-        ++frames_shown;
-        return true;
-    }
-
-    void Reset() {
-        receiving = false;
-        waiting_keyframe = true;
-        has_picture = false;
-        if (codec != nullptr) {
-            avcodec_flush_buffers(codec);
-        }
-    }
-};
-
-// ---------- Audio ----------
-struct Audio {
-    SDL_AudioDeviceID device = 0;
-    OpusDecoder* decoder = nullptr;
-    std::vector<int16_t> pcm = std::vector<int16_t>(5760 * 2);
-
-    bool Open() {
-        SDL_AudioSpec want{};
-        want.freq = 48000;
-        want.format = AUDIO_S16SYS;
-        want.channels = 2;
-        want.samples = 512;
-        device = SDL_OpenAudioDevice(nullptr, 0, &want, nullptr, 0);
-        int error = 0;
-        decoder = opus_decoder_create(48000, 2, &error);
-        if (device != 0) {
-            SDL_PauseAudioDevice(device, 0);
-        }
-        return device != 0 && decoder != nullptr;
-    }
-
-    void Play(const uint8_t* data, size_t size) {
-        if (device == 0 || decoder == nullptr) {
-            return;
-        }
-        const int samples = opus_decode(decoder, data, static_cast<opus_int32>(size), pcm.data(),
-                                        5760, 0);
-        if (samples <= 0) {
-            return;
-        }
-        // Keep the queue short: about 80 ms at most, so sound stays in sync with the picture
-        if (SDL_GetQueuedAudioSize(device) > 48000 * 2 * 2 * 80 / 1000) {
-            SDL_ClearQueuedAudio(device);
-        }
-        SDL_QueueAudio(device, pcm.data(), static_cast<Uint32>(samples * 2 * sizeof(int16_t)));
-    }
-};
-
-// ---------- Controller ----------
-struct Controller {
-#ifdef __SWITCH__
-    PadState pad{};
-    int64_t last_merge_check = 0;
-#else
-    SDL_GameController* gamepad = nullptr;
-#endif
-
-    void Open() {
-#ifdef __SWITCH__
-        padConfigureInput(1, HidNpadStyleSet_NpadStandard);
-        hidSetNpadJoyHoldType(HidNpadJoyHoldType_Vertical);
-        padInitialize(&pad, HidNpadIdType_No1, HidNpadIdType_No2, HidNpadIdType_Handheld);
-#endif
-    }
-
-#ifdef __SWITCH__
-    // Two Joy-Cons registered as separate controllers are joined back into one pair.
-    void MergeJoyCons() {
-        const int64_t now = NowMs();
-        if (now - last_merge_check < 1500) {
-            return;
-        }
-        last_merge_check = now;
-        const u32 first = hidGetNpadStyleSet(HidNpadIdType_No1);
-        const u32 second = hidGetNpadStyleSet(HidNpadIdType_No2);
-        const bool first_single = (first & (HidNpadStyleTag_NpadJoyLeft | HidNpadStyleTag_NpadJoyRight)) &&
-                                  !(first & HidNpadStyleTag_NpadJoyDual);
-        const bool second_single = (second & (HidNpadStyleTag_NpadJoyLeft | HidNpadStyleTag_NpadJoyRight)) &&
-                                   !(second & HidNpadStyleTag_NpadJoyDual);
-        if (first_single && second_single) {
-            hidMergeSingleJoyAsDualJoy(HidNpadIdType_No1, HidNpadIdType_No2);
-        }
-    }
-#endif
-
-    InputState Read(uint32_t sequence) {
-        InputState state{};
-        state.sequence = sequence;
-#ifdef __SWITCH__
-        MergeJoyCons();
-        padUpdate(&pad);
-        state.buttons = padGetButtons(&pad) & 0xFFFF;
-        const HidAnalogStickState left = padGetStickPos(&pad, 0);
-        const HidAnalogStickState right = padGetStickPos(&pad, 1);
-        state.left_x = static_cast<int16_t>(std::clamp(left.x, -32767, 32767));
-        state.left_y = static_cast<int16_t>(std::clamp(left.y, -32767, 32767));
-        state.right_x = static_cast<int16_t>(std::clamp(right.x, -32767, 32767));
-        state.right_y = static_cast<int16_t>(std::clamp(right.y, -32767, 32767));
-#else
-        if (gamepad == nullptr && SDL_NumJoysticks() > 0 && SDL_IsGameController(0)) {
-            gamepad = SDL_GameControllerOpen(0);
-        }
-        const Uint8* keys = SDL_GetKeyboardState(nullptr);
-        auto key = [&](SDL_Scancode code, uint64_t bit) {
-            if (keys[code]) {
-                state.buttons |= bit;
-            }
+            LoggedIn(user, token, keys_made.stream_key);
         };
-        key(SDL_SCANCODE_X, ButtonA);
-        key(SDL_SCANCODE_Z, ButtonB);
-        key(SDL_SCANCODE_S, ButtonX);
-        key(SDL_SCANCODE_A, ButtonY);
-        key(SDL_SCANCODE_RETURN, ButtonPlus);
-        key(SDL_SCANCODE_BACKSPACE, ButtonMinus);
-        key(SDL_SCANCODE_LEFT, ButtonLeft);
-        key(SDL_SCANCODE_RIGHT, ButtonRight);
-        key(SDL_SCANCODE_UP, ButtonUp);
-        key(SDL_SCANCODE_DOWN, ButtonDown);
-        if (const char* test = std::getenv("CHARIS_TEST_BUTTONS")) {
-            state.buttons |= std::strtoull(test, nullptr, 0);
-        }
-#endif
-        return state;
-    }
-};
+    });
+}
 
-enum class Screen { Searching, Streaming, Menu, Message };
+void App::LoggedIn(const std::string& user, const std::string& token, const Key32& stream_key) {
+    saved.user = user;
+    saved.token = token;
+    saved.key_hex = ToHex(stream_key.data(), stream_key.size());
+    Platform::Store(saved);
+    key = stream_key;
+    form_password.clear();
+    client = std::make_unique<Client>(
+        key, Platform::DeviceName(),
+        ClientCallbacks{
+            [this](const uint8_t* frame, size_t size, bool keyframe) {
+                video.Submit(frame, size, keyframe);
+            },
+            [this](const uint8_t* opus, size_t size) { audio.Play(opus, size); }});
+    std::string error;
+    if (!client->Open(error)) {
+        message_title = "Sem rede";
+        message_text = error;
+        screen = Screen::Message;
+        return;
+    }
+    client->SetDiscovery(true);
+    server_hosts.clear();
+    entries.clear();
+    list_loaded = false;
+    last_list_ms = -100000;
+    screen = Screen::Hosts;
+}
+
+void App::Logout(const std::string& why) {
+    if (client) {
+        client->Disconnect();
+        client->Close();
+        client.reset();
+    }
+    saved.token.clear();
+    saved.key_hex.clear();
+    Platform::Store(saved);
+    form_user = saved.user;
+    form_password.clear();
+    login_error = why;
+    login_focus = form_user.empty() ? 0 : 1;
+    screen = Screen::Login;
+}
+
+void App::LoginFrame(uint64_t pressed) {
+    if (background.Busy()) {
+        return;
+    }
+    if (pressed & ButtonDown) {
+        login_focus = std::min(login_focus + 1, 3);
+    }
+    if (pressed & ButtonUp) {
+        login_focus = std::max(login_focus - 1, 0);
+    }
+    int activate = -1;
+    if (pressed & ButtonA) {
+        activate = login_focus;
+    }
+    if (pressed & ButtonPlus) {
+        activate = 2;
+    }
+    if (pressed & ButtonY) {
+        activate = 3;
+    }
+    if (Tapped(user_rect)) {
+        activate = 0;
+    } else if (Tapped(password_rect)) {
+        activate = 1;
+    } else if (Tapped(submit_rect)) {
+        activate = 2;
+    } else if (Tapped(mode_rect)) {
+        activate = 3;
+    }
+    if (activate >= 0) {
+        login_focus = activate;
+    }
+    switch (activate) {
+    case 0: {
+        std::string text;
+        if (Platform::Keyboard("Usuário da conta Charis", "Seu usuário", form_user, false, 24,
+                               text)) {
+            form_user = text;
+            login_focus = form_password.empty() ? 1 : 2;
+        }
+        break;
+    }
+    case 1: {
+        std::string text;
+        if (Platform::Keyboard("Senha da conta Charis", "Sua senha", "", true, 64, text)) {
+            form_password = text;
+            login_focus = 2;
+        }
+        break;
+    }
+    case 2:
+        SubmitLogin();
+        break;
+    case 3:
+        form_create = !form_create;
+        login_error.clear();
+        break;
+    default:
+        break;
+    }
+    if (pressed & ButtonMinus) {
+        quit = true;
+    }
+}
+
+void App::DrawLogin() {
+    ui.Page("CHARIS STREAM", form_create ? "Criar conta" : "Entre na sua conta", 196);
+    ui.Paragraph(ui.body,
+                 form_create ? "Escolha um usuário e uma senha. Depois entre com eles no Charis "
+                               "Switch do PC e pronto: sem configurar IP."
+                             : "Use a mesma conta do Charis Switch no PC. O Switch acha o PC "
+                               "sozinho, em casa ou fora dela.",
+                 72, 228, 1136, InkSoft);
+
+    const auto field = [&](Rect& rect, int y, const std::string& label, const std::string& value,
+                           bool focus) {
+        rect = {72, y, 760, 76};
+        ui.Box(rect, 20, focus ? Cream3 : Cream2);
+        if (focus) {
+            ui.Outline(rect, 20, Charcoal, 2);
+        }
+        ui.Text(ui.small, label, 96, y + 10, InkSoft);
+        ui.Text(ui.bold, value, 96, y + 36, Ink);
+    };
+    field(user_rect, 316, "USUÁRIO", form_user.empty() ? "Toque para digitar" : form_user,
+          login_focus == 0);
+    field(password_rect, 408, "SENHA",
+          form_password.empty() ? "Toque para digitar" : std::string(form_password.size(), '*'),
+          login_focus == 1);
+
+    submit_rect = {72, 508, 360, 70};
+    ui.Box(submit_rect, 22, Charcoal);
+    if (login_focus == 2) {
+        ui.Outline({submit_rect.x - 4, submit_rect.y - 4, submit_rect.w + 8, submit_rect.h + 8},
+                   24, InkSoft, 2);
+    }
+    if (background.Busy()) {
+        ui.Dots(submit_rect.x + submit_rect.w / 2 - 22, submit_rect.y + 35, Cream, Now());
+    } else {
+        ui.Text(ui.bold, form_create ? "Criar e entrar" : "Entrar", submit_rect.x + submit_rect.w / 2,
+                submit_rect.y + 20, Cream, 1);
+    }
+    mode_rect = {452, 508, 380, 70};
+    ui.Box(mode_rect, 22, login_focus == 3 ? Cream3 : Cream2);
+    if (login_focus == 3) {
+        ui.Outline(mode_rect, 22, Charcoal, 2);
+    }
+    ui.Text(ui.bold, form_create ? "Já tenho conta" : "Criar uma conta", mode_rect.x + mode_rect.w / 2,
+            mode_rect.y + 20, Ink, 1);
+
+    if (!login_error.empty()) {
+        ui.Box({872, 316, 336, 262}, 22, Danger);
+        ui.Paragraph(ui.small, login_error, 896, 336, 292, Cream, 4);
+    } else {
+        ui.Box({872, 316, 336, 262}, 22, Cream2);
+        ui.Text(ui.bold, "Como funciona", 896, 336, Ink);
+        ui.Paragraph(ui.small,
+                     "1. No PC, abra o Charis Switch e entre na conta. 2. Aqui, entre com a "
+                     "mesma conta. 3. Escolha o PC e jogue.",
+                     896, 372, 292, InkSoft, 4);
+    }
+    int x = 72;
+    x += ui.Hint(x, ScreenH - 62, "A", "Escolher", false);
+    x += ui.Hint(x, ScreenH - 62, "+", form_create ? "Criar" : "Entrar", false);
+    ui.Hint(x, ScreenH - 62, "-", "Sair do app", false);
+}
+
+// ---------- PC list ----------
+
+void App::RefreshHosts() {
+    if (background.Busy() || !client) {
+        return;
+    }
+    last_list_ms = now;
+    const std::string token = saved.token;
+    background.Run([this, token]() -> std::function<void()> {
+        Account account{*http};
+        std::vector<HostEntry> hosts;
+        const std::string error = account.ListHosts(token, hosts);
+        const bool expired = account.LoginExpired();
+        return [this, error, hosts, expired] {
+            if (expired) {
+                Logout(error);
+                return;
+            }
+            list_error = error;
+            if (error.empty()) {
+                server_hosts = hosts;
+            }
+            list_loaded = true;
+        };
+    });
+}
+
+void App::BuildEntries() {
+    std::vector<Entry> next;
+    const std::vector<DiscoveredHost> found = client ? client->Discovered() : std::vector<DiscoveredHost>{};
+    for (const DiscoveredHost& lan : found) {
+        Entry entry;
+        entry.id = ToHex(lan.id.data(), lan.id.size());
+        entry.name = lan.name;
+        entry.addresses.push_back(lan.address);
+        entry.home = true;
+        entry.online = true;
+        next.push_back(entry);
+    }
+    for (const HostEntry& host : server_hosts) {
+        auto it = std::find_if(next.begin(), next.end(),
+                               [&](const Entry& e) { return e.id == host.id; });
+        if (it == next.end()) {
+            Entry entry;
+            entry.id = host.id;
+            entry.name = host.name;
+            entry.online = host.online;
+            next.push_back(entry);
+            it = next.end() - 1;
+        }
+        for (const Address& address : host.local) {
+            if (std::find(it->addresses.begin(), it->addresses.end(), address) ==
+                it->addresses.end()) {
+                it->addresses.push_back(address);
+            }
+        }
+        if (host.public_address.Valid() &&
+            std::find(it->addresses.begin(), it->addresses.end(), host.public_address) ==
+                it->addresses.end()) {
+            it->addresses.push_back(host.public_address);
+        }
+    }
+    std::stable_sort(next.begin(), next.end(), [](const Entry& a, const Entry& b) {
+        const int ra = a.home ? 0 : (a.online ? 1 : 2);
+        const int rb = b.home ? 0 : (b.online ? 1 : 2);
+        return ra < rb;
+    });
+    // Keep the same PC selected while the list changes
+    const std::string selected_id =
+        selected < static_cast<int>(entries.size()) ? entries[selected].id : saved.last_host;
+    entries = std::move(next);
+    selected = 0;
+    for (size_t i = 0; i < entries.size(); ++i) {
+        if (entries[i].id == selected_id) {
+            selected = static_cast<int>(i);
+        }
+    }
+}
+
+void App::HostsFrame(uint64_t pressed) {
+    if (now - last_list_ms > 15000) {
+        RefreshHosts(); // also tells the PCs of the account that a Switch is looking
+    }
+    BuildEntries();
+    if (confirm_logout) {
+        if (pressed & ButtonA) {
+            confirm_logout = false;
+            Logout("");
+        } else if (pressed & (ButtonB | ButtonX)) {
+            confirm_logout = false;
+        }
+        return;
+    }
+    if (pressed) {
+        user_moved = true;
+    }
+    if (pressed & ButtonDown) {
+        selected = std::min(selected + 1, std::max(0, static_cast<int>(entries.size()) - 1));
+    }
+    if (pressed & ButtonUp) {
+        selected = std::max(selected - 1, 0);
+    }
+    for (size_t i = 0; i < entry_rects.size() && i < entries.size(); ++i) {
+        if (Tapped(entry_rects[i])) {
+            selected = static_cast<int>(i);
+            user_moved = true;
+            pressed |= ButtonA;
+        }
+    }
+    if (pressed & ButtonY) {
+        last_list_ms = -100000;
+    }
+    if (pressed & ButtonX) {
+        confirm_logout = true;
+    }
+    if (pressed & ButtonPlus) {
+        quit = true;
+    }
+    const bool can_connect =
+        selected < static_cast<int>(entries.size()) &&
+        (entries[selected].home || entries[selected].online) &&
+        !entries[selected].addresses.empty();
+    if ((pressed & ButtonA) && can_connect) {
+        Connect(entries[selected]);
+        return;
+    }
+    // Automated runs on a PC: connect to the first PC that can be reached
+    if (std::getenv("CHARIS_AUTOCONNECT") != nullptr && !auto_connect_done && can_connect) {
+        auto_connect_done = true;
+        Connect(entries[selected]);
+        return;
+    }
+    // Opening the app goes straight back to the PC used last time, when it is there
+    if (!auto_connect_done && list_loaded) {
+        if (list_ready_ms == 0) {
+            list_ready_ms = now;
+        }
+        if (user_moved || now - list_ready_ms > 6000) {
+            auto_connect_done = true;
+        } else if (can_connect && entries[selected].id == saved.last_host &&
+                   now - list_ready_ms > 1200) {
+            auto_connect_done = true;
+            Connect(entries[selected]);
+        }
+    }
+}
+
+void App::DrawHosts() {
+    ui.Page("CHARIS STREAM · " + saved.user, "Seus PCs", 196);
+    entry_rects.clear();
+    if (entries.empty()) {
+        ui.Text(ui.title, list_loaded ? "Nenhum PC ligado ainda" : "Procurando seus PCs", 72, 240,
+                Ink);
+        if (!list_loaded) {
+            ui.Dots(72 + ui.Measure(ui.title, "Procurando seus PCs") + 24, 262, Ink, Now());
+        }
+        ui.Paragraph(ui.body,
+                     list_error.empty()
+                         ? "No PC, abra o Charis Switch e entre na conta " + saved.user +
+                               ". Ele aparece aqui sozinho, em casa ou fora dela."
+                         : list_error + " Em casa, o PC ainda aparece pela rede.",
+                     72, 300, 1136, InkSoft);
+    }
+    for (size_t i = 0; i < entries.size() && i < 4; ++i) {
+        const Entry& entry = entries[i];
+        const bool on = static_cast<int>(i) == selected;
+        const Rect rect{64, 236 + static_cast<int>(i) * 96, ScreenW - 128, 82};
+        entry_rects.push_back(rect);
+        ui.Box(rect, 22, on ? Charcoal : Cream2);
+        ui.Text(ui.bold, entry.name, rect.x + 32, rect.y + 14, on ? Cream : Ink);
+        std::string where;
+        Color dot = InkSoft;
+        if (entry.home) {
+            where = "Em casa · pronto para jogar";
+            dot = Good;
+        } else if (entry.online) {
+            where = "Pela internet · pronto para jogar";
+            dot = Good;
+        } else {
+            where = "Desligado ou com o Charis Switch fechado";
+            dot = SageLight;
+        }
+        ui.Circle(rect.x + 40, rect.y + 58, 6, dot);
+        ui.Text(ui.small, where, rect.x + 56, rect.y + 47, on ? OnDarkSoft : InkSoft);
+        if (entry.id == saved.last_host) {
+            ui.Text(ui.small, "último usado", rect.x + rect.w - 32, rect.y + 30,
+                    on ? OnDarkSoft : InkSoft, 2);
+        }
+    }
+    int x = 72;
+    x += ui.Hint(x, ScreenH - 62, "A", "Jogar", false);
+    x += ui.Hint(x, ScreenH - 62, "Y", "Atualizar", false);
+    x += ui.Hint(x, ScreenH - 62, "X", "Sair da conta", false);
+    ui.Hint(x, ScreenH - 62, "+", "Fechar o app", false);
+
+    if (confirm_logout) {
+        ui.Shade(150);
+        ui.Box({340, 220, 600, 280}, 28, Cream);
+        ui.Text(ui.title, "Sair da conta?", 380, 256, Ink);
+        ui.Paragraph(ui.body, "Para jogar de novo, você vai precisar entrar com a senha.", 380,
+                     312, 520, InkSoft);
+        ui.Hint(380, 440, "A", "Sair", false);
+        ui.Hint(540, 440, "B", "Cancelar", false);
+    }
+}
+
+// ---------- Connecting ----------
+
+void App::SendConnectRequest() {
+    if (!client) {
+        return;
+    }
+    const Address public_address = client->PublicAddress();
+    const Address local = client->LocalAddress();
+    request_sent_with_public = public_address.Valid();
+    const std::string token = saved.token;
+    const std::string host_id = target.id;
+    const std::string client_id = saved.client_id;
+    const std::string name = Platform::DeviceName();
+    std::thread([this, token, host_id, client_id, name, public_address, local] {
+        Account account{*http};
+        std::vector<Address> locals;
+        if (local.Valid()) {
+            locals.push_back(local);
+        }
+        account.RequestConnect(token, host_id, client_id, name, public_address, locals);
+    }).detach();
+}
+
+void App::Connect(const Entry& entry) {
+    target = entry;
+    saved.last_host = entry.id;
+    Platform::Store(saved);
+    video.Reset();
+    audio.Reset();
+    StartRequest settings{};
+    settings.width = static_cast<uint16_t>(output_w >= 1920 ? 1920 : 1280);
+    settings.height = static_cast<uint16_t>(output_w >= 1920 ? 1080 : 720);
+    settings.fps = 60;
+    settings.bitrate_kbps = BitrateFor(entry.home);
+    client->SetDiscovery(false);
+    client->Connect(entry.addresses, settings);
+    connect_started = now;
+    // The PC opens its way to this Switch when it hears about it from the account server
+    SendConnectRequest();
+    screen = Screen::Connecting;
+}
+
+void App::ConnectingFrame(uint64_t pressed) {
+    if (!client) {
+        return;
+    }
+    if (!request_sent_with_public && client->PublicAddress().Valid()) {
+        SendConnectRequest();
+    }
+    const Client::State state = client->GetState();
+    if (state == Client::State::Streaming) {
+        screen = Screen::Streaming;
+        desktop = false;
+        menu_open = false;
+        pointer.Reset();
+        keys.Clear();
+        previous_buttons = ~0ull; // nothing counts as pressed until it is let go
+        Platform::KeepAwake(true);
+        Toast("Segure + e − juntos para abrir o menu", 4000);
+        if (std::getenv("CHARIS_TEST_DESKTOP") != nullptr) { // automated runs on a PC
+            desktop = true;
+            help_until = now + 6000;
+            if (const char* text = std::getenv("CHARIS_KEYBOARD")) {
+                keys.Text(text);
+                keys.Special(KeyEnter);
+            }
+        }
+        return;
+    }
+    if (state == Client::State::Failed) {
+        StopStreaming("Não deu para conectar", client->FailureReason());
+        return;
+    }
+    if (pressed & ButtonB) {
+        client->Disconnect();
+        client->SetDiscovery(true);
+        screen = Screen::Hosts;
+        auto_connect_done = true;
+    }
+}
+
+void App::DrawConnecting() {
+    ui.Page("CHARIS STREAM", "Conectando", 196);
+    ui.Text(ui.title, target.name, 72, 240, Ink);
+    ui.Dots(72 + ui.Measure(ui.title, target.name) + 26, 262, Ink, Now());
+    const int64_t elapsed = now - connect_started;
+    std::string step;
+    if (target.home) {
+        step = "Pela rede de casa.";
+    } else if (elapsed < 4000) {
+        step = "Pela internet: avisando o PC pela sua conta.";
+    } else {
+        step = "Pela internet: abrindo o caminho entre o Switch e o PC. Pode levar até 15 "
+               "segundos na primeira vez.";
+    }
+    ui.Paragraph(ui.body, step, 72, 300, 1136, InkSoft);
+    ui.Hint(72, ScreenH - 62, "B", "Cancelar", false);
+}
+
+// ---------- Streaming ----------
+
+void App::StopStreaming(const std::string& title, const std::string& why) {
+    if (client) {
+        client->Disconnect();
+        client->SetDiscovery(true);
+    }
+    Platform::KeepAwake(false);
+    video.Reset();
+    audio.Reset();
+    menu_open = false;
+    auto_connect_done = true;
+    if (title.empty()) {
+        screen = Screen::Hosts;
+        last_list_ms = -100000;
+        return;
+    }
+    message_title = title;
+    message_text = why;
+    screen = Screen::Message;
+}
+
+void App::MenuChoose() {
+    switch (menu_choice) {
+    case 0:
+        menu_open = false;
+        break;
+    case 1:
+        desktop = !desktop;
+        pointer.Reset();
+        menu_open = false;
+        if (desktop) {
+            help_until = now + 6000;
+            Toast("Modo PC: mouse e teclado");
+        } else {
+            Toast("Modo jogo: controle e toque");
+        }
+        break;
+    case 2: {
+        std::string text;
+        if (Platform::Keyboard("Digitar no PC", "O texto vai para onde está o cursor no PC", "",
+                               false, 400, text)) {
+            keys.Text(text);
+        }
+        menu_open = false;
+        break;
+    }
+    case 3:
+        client->SendCommand(Type::GoHome);
+        menu_open = false;
+        desktop = false;
+        Toast("Voltando para a tela inicial do Charis Switch");
+        break;
+    case 4:
+        home_frames = 8;
+        menu_open = false;
+        break;
+    case 5:
+        saved.quality = (saved.quality + 1) % 3;
+        Platform::Store(saved);
+        client->RequestBitrate(BitrateFor(target.home));
+        break;
+    case 6:
+        show_stats = !show_stats;
+        break;
+    case 7:
+        StopStreaming("", "");
+        break;
+    default:
+        break;
+    }
+}
+
+void App::StreamingFrame(const PadSnapshot& pad, uint64_t pressed, int dt_ms) {
+    if (!client) {
+        return;
+    }
+    const Client::State state = client->GetState();
+    if (state == Client::State::Failed) {
+        StopStreaming("A conexão caiu", client->FailureReason());
+        return;
+    }
+    if (state != Client::State::Streaming) {
+        StopStreaming("", "");
+        return;
+    }
+    if (video.TakeKeyframeRequest()) {
+        client->SendCommand(Type::RequestKeyframe);
+    }
+
+    // + and − together for a moment: the Charis menu (the game does not see it)
+    const bool combo = (pad.buttons & ButtonPlus) && (pad.buttons & ButtonMinus);
+    if (!combo) {
+        combo_latched = false; // let go: the combo can work again
+    }
+    combo_since = combo && !combo_latched ? (combo_since == 0 ? now : combo_since) : 0;
+    if (combo_since != 0 && now - combo_since > 700) {
+        menu_open = !menu_open;
+        menu_choice = 0;
+        combo_since = 0;
+        combo_latched = true;
+        previous_buttons = ~0ull;
+        pressed = 0;
+    }
+
+    InputState input{};
+    if (menu_open) {
+        if (pressed & ButtonDown) {
+            menu_choice = std::min(menu_choice + 1, 7);
+        }
+        if (pressed & ButtonUp) {
+            menu_choice = std::max(menu_choice - 1, 0);
+        }
+        if (pressed & ButtonB) {
+            menu_open = false;
+        }
+        if (pressed & ButtonA) {
+            MenuChoose();
+        }
+        if (screen != Screen::Streaming) {
+            return;
+        }
+        input.mode = desktop ? ModeDesktop : ModeGame;
+        if (desktop) {
+            pointer.Fill(input);
+            input.mouse_buttons = 0;
+        }
+    } else if (desktop) {
+        pointer.Update(pad, pressed, dt_ms);
+        if (pressed & ButtonY) {
+            std::string text;
+            if (Platform::Keyboard("Digitar no PC", "O texto vai para onde está o cursor", "",
+                                   false, 400, text)) {
+                keys.Text(text);
+            }
+        }
+        const std::pair<uint64_t, Key> shortcuts[] = {
+            {ButtonB, KeyEscape},     {ButtonZR, KeyEnter},     {ButtonZL, KeyBackspace},
+            {ButtonLeft, KeyLeft},    {ButtonRight, KeyRight},  {ButtonUp, KeyUp},
+            {ButtonDown, KeyDown},    {ButtonL, KeyAltTab},     {ButtonR, KeyWindows},
+        };
+        for (const auto& [button, special] : shortcuts) {
+            if (pressed & button) {
+                keys.Special(special);
+            }
+        }
+        pointer.Fill(input);
+    } else {
+        input.mode = ModeGame;
+        input.buttons = pad.buttons;
+        if (home_frames > 0) {
+            input.buttons |= ButtonHome;
+            --home_frames;
+        }
+        input.left_x = static_cast<int16_t>(pad.left_x);
+        input.left_y = static_cast<int16_t>(pad.left_y);
+        input.right_x = static_cast<int16_t>(pad.right_x);
+        input.right_y = static_cast<int16_t>(pad.right_y);
+        input.touch_count = static_cast<uint8_t>(pad.touch_count);
+        for (int i = 0; i < pad.touch_count; ++i) {
+            input.touches[i].id = static_cast<uint8_t>(pad.touches[i].id);
+            input.touches[i].x = static_cast<uint16_t>(pad.touches[i].x * 65535 / 1279);
+            input.touches[i].y = static_cast<uint16_t>(pad.touches[i].y * 65535 / 719);
+        }
+    }
+    keys.Fill(input);
+    client->SendInput(input);
+}
+
+void App::DrawStreaming() {
+    SDL_SetRenderDrawColor(ui.renderer, 0, 0, 0, 255);
+    SDL_RenderClear(ui.renderer);
+    if (video.Present(ui.renderer) && video.Texture() != nullptr) {
+        SDL_Rect all{0, 0, ScreenW, ScreenH};
+        SDL_RenderCopy(ui.renderer, video.Texture(), nullptr, &all);
+    } else {
+        ui.Page("CHARIS STREAM", "Abrindo a tela", 196);
+        ui.Text(ui.title, target.name, 72, 240, Ink);
+        ui.Dots(72 + ui.Measure(ui.title, target.name) + 26, 262, Ink, Now());
+    }
+    if (desktop && !menu_open) {
+        // Where the PC pointer is, while a finger is not on it
+        const int px = static_cast<int>(pointer.X() * ScreenW);
+        const int py = static_cast<int>(pointer.Y() * ScreenH);
+        aacircleRGBA(ui.renderer, px, py, 13, Charcoal.r, Charcoal.g, Charcoal.b, 160);
+        aacircleRGBA(ui.renderer, px, py, 12, Cream.r, Cream.g, Cream.b, 200);
+    }
+    if (desktop && now < help_until && !menu_open) {
+        ui.Box({40, ScreenH - 98, ScreenW - 80, 66}, 22, Color{0x20, 0x21, 0x1C, 225});
+        int x = 64;
+        x += ui.Hint(x, ScreenH - 80, "A", "Clique", true);
+        x += ui.Hint(x, ScreenH - 80, "X", "Botão direito", true);
+        x += ui.Hint(x, ScreenH - 80, "Y", "Teclado", true);
+        x += ui.Hint(x, ScreenH - 80, "B", "Esc", true);
+        x += ui.Hint(x, ScreenH - 80, "ZR", "Enter", true);
+        ui.Hint(x, ScreenH - 80, "R", "Iniciar", true);
+    }
+    if (show_stats && client) {
+        const ClientStats stats = client->Stats();
+        char line[160];
+        std::snprintf(line, sizeof(line), "%.1f Mbps · perda %.1f%% · decodificação %.0f ms · %s",
+                      stats.bitrate_kbps / 1000.0, stats.loss_percent, video.DecodeMs(),
+                      target.home ? "em casa" : "internet");
+        ui.Box({24, 20, ui.Measure(ui.small, line) + 36, 38}, 14, Color{0x20, 0x21, 0x1C, 210});
+        ui.Text(ui.small, line, 42, 28, Cream);
+    }
+    if (now < toast_until && !menu_open) {
+        const int w = ui.Measure(ui.bold, toast) + 56;
+        ui.Box({(ScreenW - w) / 2, 28, w, 52}, 26, Color{0x20, 0x21, 0x1C, 230});
+        ui.Text(ui.bold, toast, ScreenW / 2, 41, Cream, 1);
+    }
+}
+
+void App::DrawMenu() {
+    ui.Shade(140);
+    ui.Box({ScreenW - 540, 0, 580, ScreenH}, 32, Charcoal);
+    ui.Text(ui.small, "CHARIS STREAM · " + target.name, ScreenW - 500, 34, OnDarkSoft);
+    ui.Text(ui.title, "Menu", ScreenW - 500, 58, Cream);
+    const std::string items[] = {
+        "Continuar",
+        desktop ? "Voltar ao modo jogo" : "Usar como PC (mouse e teclado)",
+        "Digitar texto",
+        "Voltar ao início",
+        "Botão HOME do jogo",
+        std::string("Qualidade: ") + QualityNames[saved.quality],
+        show_stats ? "Esconder informações" : "Mostrar informações",
+        "Desconectar",
+    };
+    const std::string details[] = {
+        "Volta para onde estava",
+        desktop ? "Controle e toque vão para o jogo" : "Analógico move, A clica, Y abre o teclado",
+        "Escreve no PC com o teclado do Switch",
+        "Fecha o jogo e mostra seus jogos no PC",
+        "Abre o menu HOME dentro do jogo",
+        "A muda: Automática, Máxima ou Leve",
+        "Velocidade e perda da conexão",
+        "Encerra e volta para a lista de PCs",
+    };
+    for (int i = 0; i < 8; ++i) {
+        const bool on = i == menu_choice;
+        const Rect rect{ScreenW - 516, 118 + i * 66, 476, 60};
+        ui.Box(rect, 18, on ? Cream : Charcoal2);
+        ui.Text(ui.bold, items[i], rect.x + 22, rect.y + 6, on ? Ink : Cream);
+        ui.Text(ui.small, details[i], rect.x + 22, rect.y + 33, on ? InkSoft : OnDarkSoft);
+    }
+    int x = ScreenW - 500;
+    x += ui.Hint(x, ScreenH - 54, "A", "Escolher", true);
+    ui.Hint(x, ScreenH - 54, "B", "Voltar ao jogo", true);
+}
+
+// ---------- Message ----------
+
+void App::MessageFrame(uint64_t pressed) {
+    if (pressed & (ButtonA | ButtonB)) {
+        screen = client ? Screen::Hosts : Screen::Login;
+        last_list_ms = -100000;
+    }
+}
+
+void App::DrawMessage() {
+    ui.Page("CHARIS STREAM", message_title, 196);
+    ui.Paragraph(ui.body, message_text, 72, 240, 1136, InkSoft);
+    ui.Hint(72, ScreenH - 62, "A", "Voltar", false);
+}
+
+// ---------- Main loop ----------
+
+int App::Run() {
+    Platform::Init();
+    SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER);
+    TTF_Init();
+    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "1");
+    SDL_DisplayMode mode{};
+    if (SDL_GetDesktopDisplayMode(0, &mode) == 0 && mode.w >= 1920 && Platform::Docked()) {
+        output_w = 1920;
+        output_h = 1080;
+    }
+    window = SDL_CreateWindow("Charis Stream", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+                              output_w, output_h, 0);
+    SDL_Renderer* renderer =
+        SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+    if (renderer == nullptr) {
+        renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_SOFTWARE);
+    }
+    SDL_RenderSetLogicalSize(renderer, ScreenW, ScreenH);
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+    ui.Open(renderer, Platform::FontPath(false).c_str(), Platform::FontPath(true).c_str());
+    video.Open();
+    audio.Open();
+    pads.Open();
+    http = Platform::MakeHttp();
+    saved = Platform::Load();
+    form_user = saved.user;
+
+    // Automated runs on a PC: CHARIS_USER and CHARIS_PASSWORD log in by themselves
+    if (const char* user = std::getenv("CHARIS_USER")) {
+        form_user = user;
+        form_password = std::getenv("CHARIS_PASSWORD") ? std::getenv("CHARIS_PASSWORD") : "";
+        form_create = std::getenv("CHARIS_CREATE") != nullptr;
+        SubmitLogin();
+    } else if (!saved.token.empty() && saved.key_hex.size() == 64 &&
+               FromHex(saved.key_hex, key.data(), key.size())) {
+        LoggedIn(saved.user, saved.token, key);
+    } else {
+        login_focus = form_user.empty() ? 0 : 1;
+    }
+    const char* screenshot = std::getenv("CHARIS_SCREENSHOT");
+    const int screenshot_after = std::getenv("CHARIS_SCREENSHOT_MS")
+                                     ? std::atoi(std::getenv("CHARIS_SCREENSHOT_MS"))
+                                     : 6000;
+    const int64_t started = Now();
+    int64_t last_frame = Now();
+
+    while (!quit && Platform::Running()) {
+        SDL_Event event;
+        while (SDL_PollEvent(&event)) {
+            if (event.type == SDL_QUIT) {
+                quit = true;
+            }
+        }
+        now = Now();
+        const int dt_ms = static_cast<int>(now - last_frame);
+        last_frame = now;
+        background.ApplyResults();
+
+        const PadSnapshot pad = pads.Read();
+        const uint64_t pressed = pad.buttons & ~previous_buttons;
+        previous_buttons = pad.buttons;
+        // A finger lifted from the interface counts as a tap where it was
+        tap_x = tap_y = -1;
+        if (screen != Screen::Streaming) {
+            static int last_x = -1;
+            static int last_y = -1;
+            if (pad.touch_count > 0) {
+                last_x = pad.touches[0].x;
+                last_y = pad.touches[0].y;
+                was_touching = true;
+            } else if (was_touching) {
+                was_touching = false;
+                tap_x = last_x;
+                tap_y = last_y;
+            }
+        } else {
+            was_touching = false;
+        }
+
+        switch (screen) {
+        case Screen::Login:
+            LoginFrame(pressed);
+            break;
+        case Screen::Hosts:
+            HostsFrame(pressed);
+            break;
+        case Screen::Connecting:
+            ConnectingFrame(pressed);
+            break;
+        case Screen::Streaming:
+            StreamingFrame(pad, pressed, dt_ms);
+            break;
+        case Screen::Message:
+            MessageFrame(pressed);
+            break;
+        }
+
+        switch (screen) {
+        case Screen::Login:
+            DrawLogin();
+            break;
+        case Screen::Hosts:
+            DrawHosts();
+            break;
+        case Screen::Connecting:
+            DrawConnecting();
+            break;
+        case Screen::Streaming:
+            DrawStreaming();
+            if (menu_open) {
+                DrawMenu();
+            }
+            break;
+        case Screen::Message:
+            DrawMessage();
+            break;
+        }
+        SDL_RenderPresent(renderer);
+
+        if (screenshot != nullptr && now - started > screenshot_after) {
+            SDL_Surface* shot = SDL_CreateRGBSurfaceWithFormat(0, ScreenW, ScreenH, 32,
+                                                               SDL_PIXELFORMAT_ARGB8888);
+            SDL_RenderReadPixels(renderer, nullptr, SDL_PIXELFORMAT_ARGB8888, shot->pixels,
+                                 shot->pitch);
+            SDL_SaveBMP(shot, screenshot);
+            SDL_FreeSurface(shot);
+            std::printf("screen=%d decoded=%u entries=%zu error=%s\n", static_cast<int>(screen),
+                        video.Decoded(), entries.size(),
+                        (login_error + list_error + message_text).c_str());
+            quit = true;
+        }
+#ifndef __SWITCH__
+        SDL_Delay(8);
+#endif
+    }
+
+    if (client) {
+        client->Disconnect();
+        client->Close();
+        client.reset();
+    }
+    video.Close();
+    audio.Close();
+    ui.Close();
+    SDL_DestroyRenderer(renderer);
+    SDL_DestroyWindow(window);
+    TTF_Quit();
+    SDL_Quit();
+    Platform::Exit();
+    return 0;
+}
 
 } // namespace
 
 int main(int, char**) {
-#ifdef __SWITCH__
-    socketInitializeDefault();
-    romfsInit();
-    const char* font_regular = "romfs:/Archivo-Regular.ttf";
-    const char* font_bold = "romfs:/Archivo-ExtraBold.ttf";
-#else
-    const char* font_regular = std::getenv("CHARIS_FONT") ? std::getenv("CHARIS_FONT") : "romfs/Archivo-Regular.ttf";
-    const char* font_bold = std::getenv("CHARIS_FONT_BOLD") ? std::getenv("CHARIS_FONT_BOLD") : "romfs/Archivo-ExtraBold.ttf";
-#endif
-
-    SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER);
-    TTF_Init();
-    SDL_Window* window = SDL_CreateWindow("Charis Stream", SDL_WINDOWPOS_CENTERED,
-                                          SDL_WINDOWPOS_CENTERED, ScreenW, ScreenH, 0);
-    Ui ui;
-    ui.renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
-    if (ui.renderer == nullptr) {
-        ui.renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_SOFTWARE);
-    }
-    SDL_SetRenderDrawBlendMode(ui.renderer, SDL_BLENDMODE_BLEND);
-    ui.title = TTF_OpenFont(font_bold, 52);
-    ui.bold = TTF_OpenFont(font_bold, 22);
-    ui.body = TTF_OpenFont(font_regular, 24);
-    ui.small = TTF_OpenFont(font_regular, 18);
-
-    Net net;
-    const bool net_ok = net.Open();
-    Video video;
-    video.Open();
-    Audio audio;
-    audio.Open();
-    Controller controller;
-    controller.Open();
-
-    std::vector<HostInfo> hosts;
-    int selected = 0;
-    HostInfo host;
-    Screen screen = Screen::Searching;
-    std::string message;
-    int64_t last_discover = 0;
-    int64_t first_found = 0;
-    int64_t last_keepalive = 0;
-    int64_t last_start = 0;
-    int64_t last_packet = 0;
-    int64_t combo_since = 0;
-    int menu_choice = 0;
-    uint32_t input_sequence = 0;
-    uint64_t previous_buttons = 0;
-    int home_frames = 0;
-    std::vector<uint8_t> buffer(2048);
-    const char* forced_host = std::getenv("CHARIS_HOST");
-    const char* screenshot_path = std::getenv("CHARIS_SCREENSHOT");
-    const int64_t started_ms = NowMs();
-    bool running = true;
-
-    const auto disconnect = [&](const std::string& why) {
-        net.Send(host.ip, Type::Stop);
-        video.Reset();
-        host = {};
-        hosts.clear();
-        first_found = 0;
-        message = why;
-        screen = why.empty() ? Screen::Searching : Screen::Message;
-    };
-
-    while (running) {
-#ifdef __SWITCH__
-        if (!appletMainLoop()) {
-            break;
-        }
-#endif
-        SDL_Event event;
-        while (SDL_PollEvent(&event)) {
-            if (event.type == SDL_QUIT) {
-                running = false;
-            }
-        }
-        const int64_t now = NowMs();
-        InputState input = controller.Read(input_sequence++);
-        const uint64_t pressed = input.buttons & ~previous_buttons;
-        previous_buttons = input.buttons;
-
-        // ---- Receive everything waiting ----
-        if (net_ok) {
-            while (true) {
-                sockaddr_in from{};
-                socklen_t from_size = sizeof(from);
-                const ssize_t got = recvfrom(net.fd, buffer.data(), buffer.size(), 0,
-                                             reinterpret_cast<sockaddr*>(&from), &from_size);
-                if (got <= 0) {
-                    break;
-                }
-                Type type;
-                const long payload = ReadHeader(buffer.data(), static_cast<size_t>(got), type);
-                if (payload < 0) {
-                    continue;
-                }
-                const uint8_t* body = buffer.data() + sizeof(Header);
-                if (type == Type::Announce && payload >= static_cast<long>(sizeof(Announce))) {
-                    Announce announce;
-                    std::memcpy(&announce, body, sizeof(announce));
-                    announce.name[sizeof(announce.name) - 1] = 0;
-                    auto it = std::find_if(hosts.begin(), hosts.end(), [&](const HostInfo& h) {
-                        return h.ip == from.sin_addr.s_addr;
-                    });
-                    if (it == hosts.end()) {
-                        hosts.push_back({from.sin_addr.s_addr, announce.name, now});
-                        if (first_found == 0) {
-                            first_found = now;
-                        }
-                    } else {
-                        it->seen_ms = now;
-                    }
-                    continue;
-                }
-                if (host.ip == 0 || from.sin_addr.s_addr != host.ip) {
-                    continue;
-                }
-                last_packet = now;
-                if (type == Type::Stop) {
-                    disconnect("O PC parou a transmissão.");
-                    break;
-                }
-                if (type == Type::Audio && payload > static_cast<long>(sizeof(AudioChunk))) {
-                    audio.Play(body + sizeof(AudioChunk), static_cast<size_t>(payload) - sizeof(AudioChunk));
-                    continue;
-                }
-                if (type != Type::Video || payload < static_cast<long>(sizeof(VideoChunk))) {
-                    continue;
-                }
-                VideoChunk chunk;
-                std::memcpy(&chunk, body, sizeof(chunk));
-                const size_t bytes = static_cast<size_t>(payload) - sizeof(chunk);
-                if (chunk.count == 0 || chunk.index >= chunk.count || chunk.frame_size > 8 * 1024 * 1024) {
-                    continue;
-                }
-                if (!video.receiving || chunk.frame != video.current) {
-                    if (video.receiving && video.missing > 0 &&
-                        static_cast<int32_t>(chunk.frame - video.current) > 0) {
-                        video.waiting_keyframe = true; // a frame was lost
-                    }
-                    if (video.receiving && static_cast<int32_t>(chunk.frame - video.current) < 0) {
-                        continue; // late piece of an older frame
-                    }
-                    video.receiving = true;
-                    video.current = chunk.frame;
-                    video.data.assign(chunk.frame_size, 0);
-                    video.got.assign(chunk.count, 0);
-                    video.missing = chunk.count;
-                    video.keyframe = chunk.keyframe != 0;
-                }
-                const size_t offset = static_cast<size_t>(chunk.index) * MaxVideoBytes;
-                if (video.got[chunk.index] || offset + bytes > video.data.size()) {
-                    continue;
-                }
-                std::memcpy(video.data.data() + offset, body + sizeof(chunk), bytes);
-                video.got[chunk.index] = 1;
-                if (--video.missing == 0) {
-                    if (video.waiting_keyframe && !video.keyframe) {
-                        continue;
-                    }
-                    video.waiting_keyframe = false;
-                    video.Decode(ui.renderer, video.data);
-                }
-            }
-        }
-
-        // ---- State machine ----
-        switch (screen) {
-        case Screen::Searching:
-            if (forced_host != nullptr && host.ip == 0) {
-                host.ip = inet_addr(forced_host);
-                host.name = forced_host;
-                screen = Screen::Streaming;
-                last_start = 0;
-                last_packet = now;
-                break;
-            }
-            if (now - last_discover > 1000) {
-                last_discover = now;
-                net.Send(htonl(INADDR_BROADCAST), Type::Discover);
-            }
-            hosts.erase(std::remove_if(hosts.begin(), hosts.end(),
-                                       [&](const HostInfo& h) { return now - h.seen_ms > 5000; }),
-                        hosts.end());
-            selected = std::clamp(selected, 0, std::max(0, static_cast<int>(hosts.size()) - 1));
-            if (pressed & ButtonDown) {
-                selected = std::min(selected + 1, std::max(0, static_cast<int>(hosts.size()) - 1));
-            }
-            if (pressed & ButtonUp) {
-                selected = std::max(selected - 1, 0);
-            }
-            if (!hosts.empty() && ((pressed & ButtonA) ||
-                                   (hosts.size() == 1 && now - first_found > 1500))) {
-                host = hosts[selected];
-                screen = Screen::Streaming;
-                last_start = 0;
-                last_packet = now;
-                video.Reset();
-            }
-            if (pressed & ButtonPlus) {
-                running = false;
-            }
-            break;
-        case Screen::Streaming:
-        case Screen::Menu: {
-            if (!video.has_picture && now - last_start > 1000) {
-                last_start = now;
-                const StartRequest start{1280, 720, 60, 0, 20000};
-                net.Send(host.ip, Type::Start, &start, sizeof(start));
-            }
-            if (now - last_keepalive > KeepaliveMs) {
-                last_keepalive = now;
-                net.Send(host.ip, Type::Keepalive);
-            }
-            if (video.waiting_keyframe && now - video.last_request_ms > 250) {
-                video.last_request_ms = now;
-                net.Send(host.ip, Type::RequestKeyframe);
-            }
-            if (now - last_packet > TimeoutMs) {
-                disconnect("A conexão com o PC caiu.");
-                break;
-            }
-            // − and + together for a second: Charis menu (the game does not see it)
-            const bool combo = (input.buttons & ButtonPlus) && (input.buttons & ButtonMinus);
-            combo_since = combo ? (combo_since == 0 ? now : combo_since) : 0;
-            if (screen == Screen::Streaming) {
-                if (combo_since != 0 && now - combo_since > 900) {
-                    screen = Screen::Menu;
-                    menu_choice = 0;
-                    combo_since = 0;
-                }
-                if (home_frames > 0) {
-                    input.buttons |= ButtonHome;
-                    --home_frames;
-                }
-                net.Send(host.ip, Type::Input, &input, sizeof(input));
-            } else {
-                InputState idle{};
-                idle.sequence = input.sequence;
-                net.Send(host.ip, Type::Input, &idle, sizeof(idle));
-                if (pressed & ButtonDown) {
-                    menu_choice = std::min(menu_choice + 1, 3);
-                }
-                if (pressed & ButtonUp) {
-                    menu_choice = std::max(menu_choice - 1, 0);
-                }
-                if (pressed & ButtonB) {
-                    screen = Screen::Streaming;
-                }
-                if (pressed & ButtonA) {
-                    if (menu_choice == 0) {
-                        screen = Screen::Streaming;
-                    } else if (menu_choice == 1) {
-                        // Close the game on the PC and show the Charis home screen
-                        net.Send(host.ip, Type::GoHome);
-                        screen = Screen::Streaming;
-                    } else if (menu_choice == 2) {
-                        screen = Screen::Streaming;
-                        home_frames = 6;
-                    } else {
-                        disconnect("");
-                    }
-                }
-            }
-            break;
-        }
-        case Screen::Message:
-            if (pressed & (ButtonA | ButtonB)) {
-                screen = Screen::Searching;
-                message.clear();
-            }
-            break;
-        }
-
-        // ---- Draw ----
-        if ((screen == Screen::Streaming || screen == Screen::Menu) && video.has_picture) {
-            SDL_SetRenderDrawColor(ui.renderer, 0, 0, 0, 255);
-            SDL_RenderClear(ui.renderer);
-            SDL_RenderCopy(ui.renderer, video.texture, nullptr, nullptr);
-        } else {
-            ui.Fill(Charcoal);
-            ui.Text(ui.bold, "CHARIS STREAM", 72, 64, OnDarkSoft);
-            if (screen == Screen::Streaming || screen == Screen::Menu) {
-                ui.Text(ui.title, "Conectando...", 72, 100, Cream);
-                ui.Text(ui.body, "Abrindo a tela de " + host.name, 72, 176, OnDarkSoft);
-            } else if (screen == Screen::Message) {
-                ui.Text(ui.title, "Transmissão encerrada", 72, 100, Cream);
-                ui.Text(ui.body, message, 72, 176, OnDarkSoft);
-                ui.Hint(72, ScreenH - 80, "A", "Procurar de novo", true);
-            } else {
-                ui.Text(ui.title, "Olá! Vamos jogar no PC?", 72, 100, Cream);
-                ui.Box(0, 220, ScreenW, ScreenH - 220 + 40, 28, Cream);
-                if (hosts.empty()) {
-                    ui.Text(ui.bold, net_ok ? "Procurando o Charis Switch na sua rede..." :
-                                              "Sem conexão de rede no Switch.", 72, 270, Ink);
-                    ui.Text(ui.body, "No PC, abra o Charis Switch e clique em \"Transmitir para o Switch\".",
-                            72, 312, InkSoft);
-                    ui.Text(ui.body, "O PC e o Switch precisam estar na mesma rede.", 72, 348, InkSoft);
-                } else {
-                    ui.Text(ui.small, "PCS ENCONTRADOS", 72, 258, InkSoft);
-                    for (size_t i = 0; i < hosts.size() && i < 4; ++i) {
-                        const bool on = static_cast<int>(i) == selected;
-                        const int y = 292 + static_cast<int>(i) * 92;
-                        ui.Box(64, y, ScreenW - 128, 78, 20, on ? Charcoal : Cream2);
-                        ui.Text(ui.bold, hosts[i].name, 96, y + 14, on ? Cream : Ink);
-                        ui.Text(ui.small, IpText(hosts[i].ip), 96, y + 44, on ? OnDarkSoft : InkSoft);
-                    }
-                }
-                ui.Hint(72, ScreenH - 64, "A", "Conectar", false);
-                ui.Hint(260, ScreenH - 64, "+", "Sair", false);
-            }
-        }
-        if (screen == Screen::Menu) {
-            SDL_SetRenderDrawColor(ui.renderer, 0, 0, 0, 140);
-            SDL_Rect shade{0, 0, ScreenW, ScreenH};
-            SDL_RenderFillRect(ui.renderer, &shade);
-            ui.Box(ScreenW - 520, 0, 560, ScreenH, 32, Charcoal);
-            ui.Text(ui.small, "CHARIS STREAM", ScreenW - 484, 40, OnDarkSoft);
-            ui.Text(ui.title, "Menu", ScreenW - 484, 66, Cream);
-            const char* items[] = {"Continuar", "Voltar ao início", "Botão HOME do jogo",
-                                   "Desconectar"};
-            const char* details[] = {"Volta para o jogo", "Fecha o jogo e mostra seus jogos",
-                                     "Abre o menu HOME dentro do jogo", "Encerra a transmissão"};
-            ui.Box(ScreenW - 496, 150, 472, 4 * 86 + 16, 26, SageLight);
-            for (int i = 0; i < 4; ++i) {
-                const bool on = i == menu_choice;
-                const int y = 158 + i * 86;
-                ui.Box(ScreenW - 488, y, 456, 76, 20, on ? Charcoal : Cream);
-                ui.Text(ui.bold, items[i], ScreenW - 464, y + 12, on ? Cream : Ink);
-                ui.Text(ui.small, details[i], ScreenW - 464, y + 44, on ? OnDarkSoft : InkSoft);
-            }
-            ui.Hint(ScreenW - 484, ScreenH - 64, "A", "Selecionar", true);
-            ui.Hint(ScreenW - 300, ScreenH - 64, "B", "Voltar ao jogo", true);
-        }
-        SDL_RenderPresent(ui.renderer);
-
-        if (screenshot_path != nullptr && now - started_ms > 6000) {
-            SDL_Surface* shot = SDL_CreateRGBSurfaceWithFormat(0, ScreenW, ScreenH, 32, SDL_PIXELFORMAT_ARGB8888);
-            SDL_RenderReadPixels(ui.renderer, nullptr, SDL_PIXELFORMAT_ARGB8888, shot->pixels, shot->pitch);
-            SDL_SaveBMP(shot, screenshot_path);
-            SDL_FreeSurface(shot);
-            std::printf("frames shown: %u, host: %s, screen: %d\n", video.frames_shown,
-                        host.name.c_str(), static_cast<int>(screen));
-            running = false;
-        }
-#ifndef __SWITCH__
-        SDL_Delay(1);
-#endif
-        (void)Danger;
-        (void)Charcoal2;
-    }
-
-    if (host.ip != 0) {
-        net.Send(host.ip, Type::Stop);
-    }
-    SDL_Quit();
-#ifdef __SWITCH__
-    romfsExit();
-    socketExit();
-#endif
-    return 0;
+    App app;
+    return app.Run();
 }

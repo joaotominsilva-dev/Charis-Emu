@@ -49,8 +49,10 @@ public:
     bool Open(int width, int height, int fps, int bitrate_kbps, std::string& error) override {
         graph = avfilter_graph_alloc();
         char args[256];
-        std::snprintf(args, sizeof(args), "output_idx=0:framerate=%d:draw_mouse=0:dup_frames=1",
+        // The pointer is drawn in: the Switch drives it in desktop mode (games hide it anyway)
+        std::snprintf(args, sizeof(args), "output_idx=0:framerate=%d:draw_mouse=1:dup_frames=1",
                       fps);
+        frame_rate = fps;
         AVFilterContext* capture = nullptr;
         AVFilterContext* scale = nullptr;
         if (avfilter_graph_create_filter(&capture, avfilter_get_by_name("ddagrab"), "capture",
@@ -108,6 +110,17 @@ public:
         return true;
     }
 
+    // Called by the host between frames, on the video thread
+    void SetBitrate(int bitrate_kbps) override {
+        if (encoder == nullptr || bitrate_kbps <= 0) {
+            return;
+        }
+        // NVENC changes the rate in place on the next frame (and starts it as a keyframe)
+        encoder->bit_rate = static_cast<int64_t>(bitrate_kbps) * 1000;
+        encoder->rc_max_rate = encoder->bit_rate;
+        encoder->rc_buffer_size = static_cast<int>(encoder->bit_rate / frame_rate * 2);
+    }
+
     bool Next(std::vector<uint8_t>& out, bool& keyframe, bool want_keyframe) override {
         out.clear();
         while (true) {
@@ -150,6 +163,7 @@ private:
     AVFrame* frame = nullptr;
     AVPacket* packet = nullptr;
     int64_t next_pts = 0;
+    int frame_rate = 60;
 };
 
 constexpr int OpusRate = 48000;

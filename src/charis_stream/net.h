@@ -32,6 +32,7 @@ struct Address {
 };
 
 int64_t NowMs();
+void InitSockets(); // Windows needs this once before any socket; harmless elsewhere
 
 class UdpSocket {
 public:
