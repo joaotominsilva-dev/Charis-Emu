@@ -24,7 +24,10 @@ export default async (req) => {
   }
   api ??= createApi(blobStore());
   const route = new URL(req.url).pathname.replace(/^\/api\//, '').replace(/\/$/, '');
-  const { status, fields } = await api(route, parseForm(await req.text()));
+  const { status, fields, json } = await api(route, parseForm(await req.text()));
+  if (json) {
+    return Response.json(json, { status, headers: { 'cache-control': 'no-store' } });
+  }
   return new Response(encodeFields(fields), {
     status,
     headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' },
@@ -34,5 +37,5 @@ export default async (req) => {
 export const config = {
   path: '/api/*',
   // Slows down password guessing and floods from one address
-  rateLimit: { windowLimit: 90, windowSize: 60, aggregateBy: ['ip', 'domain'] },
+  rateLimit: { action: 'rate_limit', windowLimit: 120, windowSize: 60, aggregateBy: ['ip', 'domain'] },
 };

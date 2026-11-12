@@ -97,6 +97,11 @@ std::vector<Address> Host::LocalAddresses() const {
     return out;
 }
 
+Address Host::SessionPeer() const {
+    std::scoped_lock lock{mutex};
+    return session ? session->client : Address{};
+}
+
 Address Host::PublicAddress() const {
     std::scoped_lock lock{mutex};
     return public_address;

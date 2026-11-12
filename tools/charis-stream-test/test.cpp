@@ -558,8 +558,12 @@ void PresenceTests(const AccountKeys& keys, const char* server) {
     Check(host.Start(error), "PC escutando");
     const bool upnp = std::getenv("CHARIS_UPNP_TEST") != nullptr;
     std::atomic<int> changes{0};
-    Presence presence{http, host, token, "1122334455667788", "PC teste",
-                      [&](const Presence::Status&) { ++changes; }, server};
+    Credentials credentials;
+    credentials.user = user;
+    credentials.auth_hex = keys.auth_hex;
+    credentials.token = token;
+    Presence presence{http, host, credentials, "1122334455667788", "PC teste",
+                      [&](const Presence::Status&) { ++changes; }, {}, server};
     presence.Start();
     int64_t until = NowMs() + 8000;
     while (NowMs() < until && !presence.GetStatus().online) {
@@ -644,6 +648,64 @@ void PresenceTests(const AccountKeys& keys, const char* server) {
     }
 }
 
+
+// The account server is down when the PC logs in: home play works anyway, and the PC creates
+// the account by itself once the server is back. Needs CHARIS_DEV_SERVER (dev-server.mjs path).
+void OfflineTests(const AccountKeys& keys) {
+    const char* script = std::getenv("CHARIS_DEV_SERVER");
+    if (script == nullptr) {
+        return;
+    }
+    std::printf("== Servidor fora do ar no login\n");
+    const std::string url = "http://127.0.0.1:8799/api/";
+    CurlHttp http;
+    Account account{http, url};
+    std::string token;
+    Check(!account.Login("semservidor", keys.auth_hex, token).empty() && account.Unavailable(),
+          "sem servidor: o erro diz que o servidor não respondeu (não que a senha está errada)");
+
+    HostConfig config;
+    config.name = "PC offline";
+    config.key = keys.stream_key;
+    config.port = 0;
+    HostCallbacks callbacks;
+    callbacks.make_video = [] { return std::unique_ptr<VideoSource>{}; };
+    callbacks.make_audio = [] { return std::unique_ptr<AudioSource>{}; };
+    Host host{config, callbacks};
+    std::string error;
+    Check(host.Start(error), "PC escutando em casa mesmo sem servidor");
+    Credentials credentials;
+    credentials.user = "semservidor" + std::to_string(NowMs() % 10000);
+    credentials.auth_hex = keys.auth_hex;
+    credentials.create_account = true;
+    std::string saved_token;
+    std::mutex saved_mutex;
+    Presence presence{http, host, credentials, "99aa99aa99aa99aa", "PC offline", {},
+                      [&](const std::string& t) {
+                          std::scoped_lock lock{saved_mutex};
+                          saved_token = t;
+                      },
+                      url};
+    presence.Start();
+    Sleep(2500);
+    Check(!presence.GetStatus().online && !presence.GetStatus().login_expired,
+          "sem servidor: o PC espera, sem pedir a senha de novo (" +
+              presence.GetStatus().message + ")");
+    std::system(("node " + std::string(script) + " 8799 >/dev/null 2>&1 &").c_str());
+    const int64_t until = NowMs() + 40000;
+    while (NowMs() < until && !presence.GetStatus().online) {
+        Sleep(200);
+    }
+    Check(presence.GetStatus().online, "o servidor voltou: o PC criou a conta e apareceu sozinho");
+    {
+        std::scoped_lock lock{saved_mutex};
+        Check(!saved_token.empty(), "o PC guardou o login novo");
+    }
+    presence.Stop();
+    host.Stop();
+    std::system("pkill -f 'dev-server.mjs 8799'");
+}
+
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     const bool quick = argc > 1 && std::strcmp(argv[1], "--quick") == 0;
@@ -661,6 +723,7 @@ int main(int argc, char** argv) {
     if (const char* server = std::getenv("CHARIS_ACCOUNT_URL")) {
         PresenceTests(keys, server);
     }
+    OfflineTests(keys);
     std::printf(failures == 0 ? "\nTUDO CERTO\n" : "\n%d FALHA(S)\n", failures);
     return failures == 0 ? 0 : 1;
 }

@@ -65,6 +65,9 @@ std::string Message(const std::string& error) {
     if (error == "nohost") {
         return "Esse PC não está mais disponível.";
     }
+    if (error == "missing") {
+        return "O servidor da conta Charis ainda não está no ar.";
+    }
     return "O servidor da conta Charis respondeu com um erro. Tente de novo em instantes.";
 }
 
@@ -83,7 +86,9 @@ std::string Account::Call(const std::string& route, const Fields& params, Fields
     }
     std::string response;
     login_expired = false;
+    unavailable = false;
     if (!http.Post(base_url + route, body, response)) {
+        unavailable = true;
         return "Sem conexão com o servidor da conta Charis. Confira a internet.";
     }
     answer.clear();
@@ -103,23 +108,35 @@ std::string Account::Call(const std::string& route, const Fields& params, Fields
     if (answer.count("ok") != 0) {
         return {};
     }
-    const std::string error = answer.count("error") != 0 ? answer["error"] : "server";
+    if (answer.count("error") == 0) {
+        // Not an answer of the account server at all (a "not found" page, a proxy error)
+        unavailable = true;
+        return Message(response.find("Not Found") != std::string::npos ? "missing" : "server");
+    }
+    const std::string error = answer["error"];
+    unavailable = error == "server" || error == "method";
     login_expired = error == "auth";
     return Message(error);
 }
 
 std::string Account::Register(const std::string& user, const std::string& auth_hex,
-                              std::string& token) {
+                              std::string& token, const std::string& device,
+                              const std::string& device_name) {
     Fields answer;
-    const std::string error = Call("register", {{"user", user}, {"auth", auth_hex}}, answer);
+    const std::string error = Call(
+        "register",
+        {{"user", user}, {"auth", auth_hex}, {"device", device}, {"name", device_name}}, answer);
     token = answer["token"];
     return error;
 }
 
 std::string Account::Login(const std::string& user, const std::string& auth_hex,
-                           std::string& token) {
+                           std::string& token, const std::string& device,
+                           const std::string& device_name) {
     Fields answer;
-    const std::string error = Call("login", {{"user", user}, {"auth", auth_hex}}, answer);
+    const std::string error = Call(
+        "login",
+        {{"user", user}, {"auth", auth_hex}, {"device", device}, {"name", device_name}}, answer);
     token = answer["token"];
     return error;
 }
@@ -127,14 +144,16 @@ std::string Account::Login(const std::string& user, const std::string& auth_hex,
 std::string Account::HostPoll(const std::string& token, const std::string& host_id,
                               const std::string& name, const std::vector<Address>& local,
                               const Address& public_address,
-                              std::vector<ConnectRequest>& requests, int& next_poll_ms) {
+                              std::vector<ConnectRequest>& requests, int& next_poll_ms,
+                              const std::string& game) {
     Fields answer;
     const std::string error = Call("host/poll",
                                    {{"token", token},
                                     {"host_id", host_id},
                                     {"name", name},
                                     {"local", Address::JoinList(local)},
-                                    {"public", public_address.ToString()}},
+                                    {"public", public_address.ToString()},
+                                    {"game", game}},
                                    answer);
     requests.clear();
     if (!error.empty()) {
@@ -160,9 +179,11 @@ std::string Account::HostRemove(const std::string& token, const std::string& hos
     return Call("host/remove", {{"token", token}, {"host_id", host_id}}, answer);
 }
 
-std::string Account::ListHosts(const std::string& token, std::vector<HostEntry>& hosts) {
+std::string Account::ListHosts(const std::string& token, std::vector<HostEntry>& hosts,
+                               const std::string& client_id, const std::string& client_name) {
     Fields answer;
-    const std::string error = Call("hosts", {{"token", token}}, answer);
+    const std::string error =
+        Call("hosts", {{"token", token}, {"client_id", client_id}, {"name", client_name}}, answer);
     hosts.clear();
     if (!error.empty()) {
         return error;
@@ -193,6 +214,40 @@ std::string Account::RequestConnect(const std::string& token, const std::string&
                  {"name", name},
                  {"public", public_address.ToString()},
                  {"local", Address::JoinList(local)}},
+                answer);
+}
+
+} // namespace CharisStream
+
+namespace CharisStream {
+
+std::string Account::ReportSession(const std::string& token, const std::string& host_id,
+                                   const std::string& client_name, const std::string& via,
+                                   int seconds, const std::string& game) {
+    Fields answer;
+    return Call("host/report",
+                {{"token", token},
+                 {"host_id", host_id},
+                 {"kind", "session"},
+                 {"client", client_name},
+                 {"via", via},
+                 {"seconds", std::to_string(seconds)},
+                 {"game", game}},
+                answer);
+}
+
+std::string Account::ReportGame(const std::string& token, const std::string& host_id,
+                                const std::string& title, const std::string& program_hex,
+                                int seconds, bool streamed) {
+    Fields answer;
+    return Call("host/report",
+                {{"token", token},
+                 {"host_id", host_id},
+                 {"kind", "game"},
+                 {"title", title},
+                 {"program", program_hex},
+                 {"seconds", std::to_string(seconds)},
+                 {"streamed", streamed ? "1" : "0"}},
                 answer);
 }
 

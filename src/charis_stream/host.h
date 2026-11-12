@@ -70,6 +70,8 @@ public:
     uint16_t Port() const {
         return socket.Port();
     }
+    // Where the connected Switch is (not valid when nobody is connected)
+    Address SessionPeer() const;
 
     // Where a Switch can reach this PC: on the home network, and from the internet (the latter
     // is known a moment after Start, once a STUN server answered; not valid until then).

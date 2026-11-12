@@ -1,0 +1,12 @@
+"$schema" = "https://open-api.netlify.com/netlify.schema.json"
+
+# Charis Conta: the account server and web panel for Charis Switch and Charis Stream.
+# Everything lives in tools/charis-account-server; the rest of this repository is the emulator
+# and is not built on Netlify.
+[build]
+  base = "tools/charis-account-server"
+  publish = "public"
+  command = "npm install --no-audit --no-fund"
+
+[functions]
+  node_bundler = "esbuild"

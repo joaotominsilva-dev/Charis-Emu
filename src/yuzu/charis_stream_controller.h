@@ -4,6 +4,7 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -45,6 +46,10 @@ public:
     QString ClientName() const;
     CharisStream::Presence::Status PresenceStatus() const;
 
+    // For the account history and the web panel: the game running on this PC
+    void GameStarted(const QString& title, uint64_t program_id);
+    void GameStopped();
+
 signals:
     void SessionChanged(bool connected, const QString& client);
     void PresenceChanged();
@@ -79,6 +84,17 @@ private:
     uint8_t last_touch_count = 0;
     CharisStream::TouchPoint last_touches[CharisStream::MaxTouches]{};
 
+    void Report(std::function<void(CharisStream::Account&, const std::string& token)> call);
+
     mutable std::mutex client_mutex;
     QString client_name;
+    std::string host_id;
+
+    // History (UI thread, except where noted)
+    QString game_title;
+    uint64_t game_program = 0;
+    qint64 game_started_ms = 0;
+    std::atomic<bool> streamed_this_game{false}; // set from the host thread
+    qint64 session_started_ms = 0;               // host thread
+    std::string session_via;                     // host thread
 };

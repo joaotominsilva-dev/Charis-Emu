@@ -2,9 +2,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <cstring>
+#include <thread>
+
+#include <QDateTime>
 
 #include "charis_stream/host.h"
 #include "charis_stream/sources.h"
+#include "charis_stream/upnp.h"
 #include "common/settings.h"
 #include "core/core.h"
 #include "hid_core/hid_core.h"
@@ -73,7 +77,8 @@ CharisStream::Presence::Status CharisStreamController::PresenceStatus() const {
 }
 
 bool CharisStreamController::Start(const CharisAccountData& account, const QString& pc_name,
-                                   const QString& host_id, QString& error) {
+                                   const QString& host_id_text, QString& error) {
+    const std::string host_id_hex = host_id_text.toStdString();
     if (host) {
         return true;
     }
@@ -84,8 +89,7 @@ bool CharisStreamController::Start(const CharisAccountData& account, const QStri
     CharisStream::HostConfig config;
     config.name = pc_name.toStdString();
     config.key = account.stream_key;
-    if (!CharisStream::FromHex(host_id.toStdString(), config.host_id.data(),
-                               config.host_id.size())) {
+    if (!CharisStream::FromHex(host_id_hex, config.host_id.data(), config.host_id.size())) {
         error = QStringLiteral("A identificação deste PC está corrompida.");
         return false;
     }
@@ -95,6 +99,25 @@ bool CharisStreamController::Start(const CharisAccountData& account, const QStri
     callbacks.make_audio = [] { return CharisStream::MakeLoopbackAudioSource(); };
     callbacks.on_input = [this](const CharisStream::InputState& state) { OnInput(state); };
     callbacks.on_session = [this](bool connected, const std::string& client) {
+        // The account history: who played, for how long, at home or over the internet
+        if (connected) {
+            session_started_ms = QDateTime::currentMSecsSinceEpoch();
+            const CharisStream::Address peer = host ? host->SessionPeer() : CharisStream::Address{};
+            session_via = peer.Valid() && CharisStream::IsPrivateIp(peer.ip) ? "casa" : "internet";
+            streamed_this_game = true;
+        } else if (session_started_ms != 0) {
+            const int seconds =
+                static_cast<int>((QDateTime::currentMSecsSinceEpoch() - session_started_ms) / 1000);
+            session_started_ms = 0;
+            const std::string via = session_via;
+            QMetaObject::invokeMethod(this, [this, client, via, seconds] {
+                const std::string game = game_title.toStdString();
+                Report([client, via, seconds, game, id = host_id](CharisStream::Account& account,
+                                                                   const std::string& token) {
+                    account.ReportSession(token, id, client, via, seconds, game);
+                });
+            }, Qt::QueuedConnection);
+        }
         {
             std::scoped_lock lock{input_mutex};
             desktop_input.Release();
@@ -118,6 +141,7 @@ bool CharisStreamController::Start(const CharisAccountData& account, const QStri
             emit GoHomeRequested();
         }
     };
+    host_id = host_id_hex;
     auto next = std::make_unique<CharisStream::Host>(std::move(config), std::move(callbacks));
     std::string start_error;
     if (!next->Start(start_error)) {
@@ -127,14 +151,25 @@ bool CharisStreamController::Start(const CharisAccountData& account, const QStri
     host = std::move(next);
     http = CharisStream::MakeSystemHttp();
     if (http) {
+        CharisStream::Credentials credentials;
+        credentials.user = account.user.toStdString();
+        credentials.auth_hex = account.auth_hex.toStdString();
+        credentials.token = account.token.toStdString();
+        credentials.create_account = account.create_pending;
         presence = std::make_unique<CharisStream::Presence>(
-            *http, *host, account.token.toStdString(), host_id.toStdString(),
-            pc_name.toStdString(), [this](const CharisStream::Presence::Status& status) {
+            *http, *host, credentials, host_id_hex, pc_name.toStdString(),
+            [this](const CharisStream::Presence::Status& status) {
                 emit PresenceChanged();
                 if (status.login_expired) {
                     emit LoginExpired();
                 }
+            },
+            [this](const std::string& token) {
+                QMetaObject::invokeMethod(this, [token] {
+                    CharisAccountStore::SaveToken(QString::fromStdString(token));
+                }, Qt::QueuedConnection);
             });
+        presence->SetGame(game_title.toStdString());
         presence->Start();
     }
     return true;
@@ -164,6 +199,55 @@ void CharisStreamController::OnSessionChanged(bool connected, const QString&) {
     } else {
         RestorePlayerOne();
     }
+}
+
+void CharisStreamController::Report(
+    std::function<void(CharisStream::Account&, const std::string& token)> call) {
+    const std::string token = presence ? presence->Token() : std::string{};
+    if (token.empty()) {
+        return; // not on the account server (yet): nothing to keep the history in
+    }
+    std::thread([call = std::move(call), token] {
+        if (auto report_http = CharisStream::MakeSystemHttp()) {
+            CharisStream::Account account{*report_http};
+            call(account, token);
+        }
+    }).detach();
+}
+
+void CharisStreamController::GameStarted(const QString& title, uint64_t program_id) {
+    game_title = title;
+    game_program = program_id;
+    game_started_ms = QDateTime::currentMSecsSinceEpoch();
+    streamed_this_game = IsStreaming();
+    if (presence) {
+        presence->SetGame(title.toStdString());
+    }
+}
+
+void CharisStreamController::GameStopped() {
+    if (game_title.isEmpty()) {
+        return;
+    }
+    const int seconds =
+        static_cast<int>((QDateTime::currentMSecsSinceEpoch() - game_started_ms) / 1000);
+    const std::string title = game_title.toStdString();
+    const std::string program =
+        game_program != 0 ? QStringLiteral("%1").arg(game_program, 16, 16, QLatin1Char('0')).toStdString()
+                          : std::string{};
+    const bool streamed = streamed_this_game;
+    game_title.clear();
+    game_program = 0;
+    if (presence) {
+        presence->SetGame({});
+    }
+    if (seconds < 30) {
+        return; // opened and closed: not worth a line in the history
+    }
+    Report([title, program, seconds, streamed, id = host_id](CharisStream::Account& account,
+                                                              const std::string& token) {
+        account.ReportGame(token, id, title, program, seconds, streamed);
+    });
 }
 
 // Player 1 becomes a Pro Controller read from the virtual gamepad; the old mapping is kept

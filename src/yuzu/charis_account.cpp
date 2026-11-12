@@ -93,6 +93,7 @@ QString CanonicalUser(const QString& text) {
 
 struct LoginResult {
     QString error;
+    bool offline = false; // the server did not answer: home play works, the rest comes later
     CharisAccountData account;
 };
 
@@ -107,14 +108,22 @@ LoginResult RunLogin(const QString& user, const QString& password, bool create) 
         CharisStream::DeriveAccountKeys(user.toStdString(), password.toStdString());
     CharisStream::Account account{*http};
     std::string token;
-    const std::string error = create ? account.Register(user.toStdString(), keys.auth_hex, token)
-                                     : account.Login(user.toStdString(), keys.auth_hex, token);
-    if (!error.empty()) {
+    const std::string pc = CharisAccountStore::PcName().toStdString();
+    const std::string error =
+        create ? account.Register(user.toStdString(), keys.auth_hex, token, "pc", pc)
+               : account.Login(user.toStdString(), keys.auth_hex, token, "pc", pc);
+    if (!error.empty() && !account.Unavailable()) {
         result.error = QString::fromStdString(error);
         return result;
     }
+    // Without the account server the login is kept here anyway: the Switch finds this PC on
+    // the home network with the same user and password, and the PC finishes the login with the
+    // server by itself once it answers
+    result.offline = !error.empty();
     result.account.user = user;
     result.account.token = QString::fromStdString(token);
+    result.account.auth_hex = QString::fromStdString(keys.auth_hex);
+    result.account.create_pending = result.offline && create;
     result.account.stream_key = keys.stream_key;
     return result;
 }
@@ -134,6 +143,9 @@ CharisAccountData Load() {
     account.user = settings.value(QStringLiteral("account/user")).toString();
     account.token =
         QString::fromLatin1(Unseal(settings.value(QStringLiteral("account/token")).toString()));
+    account.auth_hex =
+        QString::fromLatin1(Unseal(settings.value(QStringLiteral("account/auth")).toString()));
+    account.create_pending = settings.value(QStringLiteral("account/create_pending")).toBool();
     const QByteArray key = Unseal(settings.value(QStringLiteral("account/key")).toString());
     if (key.size() == static_cast<int>(account.stream_key.size())) {
         std::memcpy(account.stream_key.data(), key.constData(), account.stream_key.size());
@@ -151,6 +163,14 @@ void Save(const CharisAccountData& account) {
         QStringLiteral("account/key"),
         Seal(QByteArray(reinterpret_cast<const char*>(account.stream_key.data()),
                         static_cast<int>(account.stream_key.size()))));
+    settings.setValue(QStringLiteral("account/auth"), Seal(account.auth_hex.toLatin1()));
+    settings.setValue(QStringLiteral("account/create_pending"), account.create_pending);
+}
+
+void SaveToken(const QString& token) {
+    QSettings settings(AccountFile(), QSettings::IniFormat);
+    settings.setValue(QStringLiteral("account/token"), Seal(token.toLatin1()));
+    settings.setValue(QStringLiteral("account/create_pending"), false);
 }
 
 void Clear() {
@@ -289,6 +309,14 @@ CharisAccountDialog::CharisAccountDialog(CharisStreamController* controller_, QW
     status_layout->addWidget(name_edit);
     available_box = new QCheckBox(QStringLiteral("Deixar este PC disponível para o Switch"), status);
     status_layout->addWidget(available_box);
+    auto* panel_link = new QLabel(
+        QStringLiteral("Seu histórico, jogos e aparelhos: <a href=\"https://charis-conta.netlify.app\">"
+                       "charis-conta.netlify.app</a>"),
+        status);
+    panel_link->setObjectName(QStringLiteral("DialogText"));
+    panel_link->setOpenExternalLinks(true);
+    panel_link->setTextInteractionFlags(Qt::TextBrowserInteraction);
+    status_layout->addWidget(panel_link);
     status_layout->addSpacing(8);
 
     auto* status_buttons = new QHBoxLayout();
@@ -476,7 +504,8 @@ void CharisAccountDialog::UpdateStatus() {
             controller ? controller->PresenceStatus() : CharisStream::Presence::Status{};
         if (status.login_expired) {
             error = true;
-            headline = QStringLiteral("O login expirou. Saia e entre na conta de novo.");
+            headline = QStringLiteral("O servidor da conta não aceitou a senha.");
+            detail = QStringLiteral("Clique em \"Sair da conta\" e entre de novo com a senha certa.");
         } else if (controller && controller->IsRunning() && status.online) {
             headline = QStringLiteral("Pronto. Abra o Charis Stream no Switch e entre com a "
                                       "conta %1.")
@@ -488,10 +517,10 @@ void CharisAccountDialog::UpdateStatus() {
                                           "pela internet; se não conseguir, ative o UPnP no "
                                           "roteador.");
         } else if (controller && controller->IsRunning() && !status.message.empty()) {
-            error = true;
-            headline = QStringLiteral("Sem contato com o servidor da conta.");
-            detail = QString::fromStdString(status.message) +
-                     QStringLiteral(" Em casa o Switch ainda acha este PC pela rede.");
+            headline = QStringLiteral("Pronto para jogar em casa.");
+            detail = QStringLiteral("O servidor da conta não respondeu. Em casa o Switch já acha "
+                                    "este PC pela rede. Para jogar fora de casa, o PC termina o "
+                                    "login sozinho quando o servidor voltar.");
         } else {
             headline = QStringLiteral("Preparando...");
         }
@@ -501,4 +530,9 @@ void CharisAccountDialog::UpdateStatus() {
     Repolish(status_preview);
     status_detail->setText(detail);
     status_detail->setVisible(!detail.isEmpty());
+    // Longer texts need more room: grow instead of cutting lines
+    layout()->activate();
+    if (sizeHint().height() > height()) {
+        resize(width(), sizeHint().height());
+    }
 }

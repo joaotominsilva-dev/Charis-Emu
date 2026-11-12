@@ -249,13 +249,20 @@ void App::SubmitLogin() {
         const AccountKeys keys_made = DeriveAccountKeys(user, password);
         Account account{*http};
         std::string token;
-        const std::string error = create ? account.Register(user, keys_made.auth_hex, token)
-                                         : account.Login(user, keys_made.auth_hex, token);
-        return [this, error, user, token, keys_made] {
-            if (!error.empty()) {
+        const std::string device = Platform::DeviceName();
+        const std::string error =
+            create ? account.Register(user, keys_made.auth_hex, token, "switch", device)
+                   : account.Login(user, keys_made.auth_hex, token, "switch", device);
+        const bool offline = !error.empty() && account.Unavailable();
+        return [this, error, offline, create, user, token, keys_made] {
+            if (!error.empty() && !offline) {
                 login_error = error;
                 return;
             }
+            // Without the account server the login still works at home: the PC answers on the
+            // home network to the same user and password; the server part is done later
+            saved.auth_hex = keys_made.auth_hex;
+            saved.create_pending = offline && create;
             LoggedIn(user, token, keys_made.stream_key);
         };
     });
@@ -298,6 +305,8 @@ void App::Logout(const std::string& why) {
     }
     saved.token.clear();
     saved.key_hex.clear();
+    saved.auth_hex.clear();
+    saved.create_pending = false;
     Platform::Store(saved);
     form_user = saved.user;
     form_password.clear();
@@ -440,16 +449,49 @@ void App::RefreshHosts() {
         return;
     }
     last_list_ms = now;
-    const std::string token = saved.token;
-    background.Run([this, token]() -> std::function<void()> {
+    const Platform::Saved current = saved;
+    const std::string device = Platform::DeviceName();
+    background.Run([this, current, device]() -> std::function<void()> {
         Account account{*http};
+        std::string token = current.token;
+        std::string error;
+        bool expired = false;
+        bool new_token = false;
+        if (token.empty() && !current.auth_hex.empty()) {
+            // The server was down at login: finish the login now
+            error = current.create_pending
+                        ? account.Register(current.user, current.auth_hex, token, "switch", device)
+                        : account.Login(current.user, current.auth_hex, token, "switch", device);
+            if (!error.empty() && current.create_pending && !account.Unavailable()) {
+                error = account.Login(current.user, current.auth_hex, token, "switch", device);
+            }
+            expired = !error.empty() && !account.Unavailable();
+            new_token = error.empty();
+        }
         std::vector<HostEntry> hosts;
-        const std::string error = account.ListHosts(token, hosts);
-        const bool expired = account.LoginExpired();
-        return [this, error, hosts, expired] {
+        if (error.empty()) {
+            error = account.ListHosts(token, hosts, current.client_id, device);
+            expired = account.LoginExpired();
+            if (expired && !current.auth_hex.empty()) {
+                // Old token: log in again with the saved code, once
+                token.clear();
+                error = account.Login(current.user, current.auth_hex, token, "switch", device);
+                expired = !error.empty() && !account.Unavailable();
+                new_token = error.empty();
+                if (new_token) {
+                    error = account.ListHosts(token, hosts, current.client_id, device);
+                }
+            }
+        }
+        return [this, error, hosts, expired, token, new_token] {
             if (expired) {
                 Logout(error);
                 return;
+            }
+            if (new_token) {
+                saved.token = token;
+                saved.create_pending = false;
+                Platform::Store(saved);
             }
             list_error = error;
             if (error.empty()) {
@@ -622,6 +664,11 @@ void App::DrawHosts() {
                     on ? OnDarkSoft : InkSoft, 2);
         }
     }
+    if (!entries.empty() && !list_error.empty()) {
+        ui.Box({64, ScreenH - 124, ScreenW - 128, 48}, 18, Cream2);
+        ui.Text(ui.small, "Sem o servidor da conta agora: aparecem só os PCs da sua casa.", 92,
+                ScreenH - 111, InkSoft);
+    }
     int x = 72;
     x += ui.Hint(x, ScreenH - 62, "A", "Jogar", false);
     x += ui.Hint(x, ScreenH - 62, "Y", "Atualizar", false);
@@ -649,6 +696,9 @@ void App::SendConnectRequest() {
     const Address local = client->LocalAddress();
     request_sent_with_public = public_address.Valid();
     const std::string token = saved.token;
+    if (token.empty()) {
+        return; // no account server right now: home network only
+    }
     const std::string host_id = target.id;
     const std::string client_id = saved.client_id;
     const std::string name = Platform::DeviceName();
@@ -1038,7 +1088,7 @@ int App::Run() {
         form_password = std::getenv("CHARIS_PASSWORD") ? std::getenv("CHARIS_PASSWORD") : "";
         form_create = std::getenv("CHARIS_CREATE") != nullptr;
         SubmitLogin();
-    } else if (!saved.token.empty() && saved.key_hex.size() == 64 &&
+    } else if (!saved.user.empty() && saved.key_hex.size() == 64 &&
                FromHex(saved.key_hex, key.data(), key.size())) {
         LoggedIn(saved.user, saved.token, key);
     } else {

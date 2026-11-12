@@ -195,15 +195,20 @@ int main() {
     CurlHttp http;
     Account account{http};
     std::string token;
-    std::string error = account.Login(user, keys.auth_hex, token);
-    if (!error.empty()) {
-        error = account.Register(user, keys.auth_hex, token);
+    std::string error = account.Login(user, keys.auth_hex, token, "pc", "PC de teste");
+    bool create = false;
+    if (!error.empty() && !account.Unavailable()) {
+        error = account.Register(user, keys.auth_hex, token, "pc", "PC de teste");
     }
-    if (!error.empty()) {
+    if (!error.empty() && account.Unavailable()) {
+        std::printf("[pc] no account server (%s): home network only\n", error.c_str());
+        create = true;
+    } else if (!error.empty()) {
         std::printf("[pc] login failed: %s\n", error.c_str());
         return 1;
+    } else {
+        std::printf("[pc] logged in as %s\n", user);
     }
-    std::printf("[pc] logged in as %s\n", user);
 
     HostConfig config;
     config.name = "PC de teste";
@@ -242,9 +247,19 @@ int main() {
             }
         }
     };
-    callbacks.on_session = [](bool connected, const std::string& client) {
+    int64_t session_start = 0;
+    Presence* presence_ptr = nullptr;
+    callbacks.on_session = [&](bool connected, const std::string& client) {
         std::printf("[pc] session %s %s\n", connected ? "started with" : "ended with",
                     client.c_str());
+        if (connected) {
+            session_start = NowMs();
+        } else if (presence_ptr != nullptr && !presence_ptr->Token().empty()) {
+            const char* game = std::getenv("CHARIS_GAME");
+            account.ReportSession(presence_ptr->Token(), "0102030405060708", client, "casa",
+                                  static_cast<int>((NowMs() - session_start) / 1000) + 1500,
+                                  game ? game : "");
+        }
     };
     callbacks.on_command = [](Type command) {
         std::printf("[pc] command %d\n", static_cast<int>(command));
@@ -257,17 +272,33 @@ int main() {
         std::printf("[pc] host failed: %s\n", error.c_str());
         return 1;
     }
-    Presence presence{http, host, token, "0102030405060708", "PC de teste",
+    Credentials credentials;
+    credentials.user = user;
+    credentials.auth_hex = keys.auth_hex;
+    credentials.token = token;
+    credentials.create_account = create;
+    if (const char* game = std::getenv("CHARIS_GAME")) {
+        std::printf("[pc] playing %s\n", game);
+    }
+    Presence presence{http, host, credentials, "0102030405060708", "PC de teste",
                       [](const Presence::Status& status) {
                           std::printf("[pc] presence online=%d router=%d %s\n", status.online,
                                       status.router_port, status.message.c_str());
                       }};
+    presence_ptr = &presence;
     presence.Start();
+    if (const char* game = std::getenv("CHARIS_GAME")) {
+        presence.SetGame(game);
+    }
     while (!stop) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
-    presence.Stop();
     host.Stop();
+    if (const char* game = std::getenv("CHARIS_GAME"); game && !presence.Token().empty()) {
+        account.ReportGame(presence.Token(), "0102030405060708", game, "0100abcdef000000", 5400,
+                           true);
+    }
+    presence.Stop();
     std::printf("[pc] stopped\n");
     return 0;
 }

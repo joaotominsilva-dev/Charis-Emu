@@ -22,6 +22,8 @@ struct Saved {
     std::string user;
     std::string token;
     std::string key_hex;   // stream key
+    std::string auth_hex;  // logs in again by itself when the server was down at login
+    bool create_pending = false;
     std::string client_id; // 16 hex, made once
     std::string last_host; // id of the PC used last
     int quality = 0;       // 0 automatic, 1 best, 2 light

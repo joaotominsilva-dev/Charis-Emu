@@ -26,7 +26,11 @@ const POLL_IDLE_MS = 10_000;
 const POLL_FAST_MS = 1_500;
 const LOOKING_MS = 90_000;
 
+const MAX_LOG = 300;      // history entries kept per account
+const MAX_DEVICES = 16;   // Switches remembered per account
+
 const ok = (fields = {}) => ({ status: 200, fields: { ok: '1', ...fields } });
+const okJson = (json) => ({ status: 200, json });
 const fail = (status, error) => ({ status, fields: { error } });
 
 function addressList(text, max = 4) {
@@ -36,6 +40,10 @@ function addressList(text, max = 4) {
 
 function cleanName(text, max = 48) {
   return String(text || '').replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, max);
+}
+
+function cleanDevice(text) {
+  return ['pc', 'switch', 'web'].includes(text) ? text : 'app';
 }
 
 function hashAuth(auth, salt) {
@@ -77,6 +85,36 @@ export function createApi(store) {
     }
   }
 
+  // History of the account: logins, play sessions on the Switch, games played on the PC
+  async function addLog(user, entry) {
+    const now = Date.now();
+    const id = `${String(now).padStart(14, '0')}-${crypto.randomBytes(3).toString('hex')}`;
+    await store.set(`log/${user}/${id}`, { at: now, ...entry });
+    if (Math.random() < 0.125) {
+      const keys = (await store.list(`log/${user}/`)).sort();
+      for (const old of keys.slice(0, Math.max(0, keys.length - MAX_LOG))) {
+        await store.delete(old);
+      }
+    }
+  }
+
+  async function touchDevice(user, clientId, name) {
+    if (!HEX16_RE.test(clientId || '')) return;
+    const key = `device/${user}/${clientId}`;
+    const now = Date.now();
+    const current = await store.get(key);
+    if (!current) {
+      if ((await store.list(`device/${user}/`)).length >= MAX_DEVICES) return;
+    } else if (now - current.last < 60_000 && current.name === (cleanName(name, 32) || current.name)) {
+      return;
+    }
+    await store.set(key, {
+      name: cleanName(name, 32) || current?.name || 'Switch',
+      first: current?.first ?? now,
+      last: now,
+    });
+  }
+
   const routes = {
     async register(p) {
       const user = String(p.user || '').toLowerCase();
@@ -85,6 +123,7 @@ export function createApi(store) {
       const written = await store.set(`user/${user}`,
         { salt, hash: hashAuth(p.auth, salt), created: Date.now() }, { onlyIfNew: true });
       if (!written) return fail(409, 'exists');
+      await addLog(user, { kind: 'created', device: cleanDevice(p.device), name: cleanName(p.name, 32) });
       return ok({ token: await makeToken(user), user });
     },
 
@@ -96,6 +135,7 @@ export function createApi(store) {
       const hash = hashAuth(p.auth, record ? record.salt : '00'.repeat(16));
       const good = record && crypto.timingSafeEqual(Buffer.from(hash), Buffer.from(record.hash));
       if (!good) return fail(403, 'wrong');
+      await addLog(user, { kind: 'login', device: cleanDevice(p.device), name: cleanName(p.name, 32) });
       return ok({ token: await makeToken(user), user });
     },
 
@@ -116,10 +156,12 @@ export function createApi(store) {
         const count = (await store.list(`host/${user}/`)).length;
         if (count >= MAX_HOSTS) return fail(409, 'full');
       }
+      const game = cleanName(p.game, 80);
       const changed = !current || current.name !== name || current.public !== pub ||
-        current.local.join() !== local.join();
+        current.local.join() !== local.join() || (current.game || '') !== game;
       if (changed || now - current.seen > 15_000) {
-        await store.set(key, { name, local, public: pub, seen: now });
+        const since = current && (current.game || '') === game ? current.game_since : now;
+        await store.set(key, { name, local, public: pub, seen: now, game, game_since: since });
       }
 
       const fields = {};
@@ -156,6 +198,7 @@ export function createApi(store) {
       if (!looking || now - looking.at > 20_000) {
         await store.set(`looking/${user}`, { at: now });
       }
+      await touchDevice(user, p.client_id, p.name);
       const fields = {};
       let n = 0;
       for (const key of await store.list(`host/${user}/`)) {
@@ -187,6 +230,78 @@ export function createApi(store) {
       await store.set(`req/${user}/${p.host_id}/${p.client_id}`,
         { name: cleanName(p.name, 32) || 'Switch', public: pub, local, at: now });
       await store.set(`looking/${user}`, { at: now });
+      await touchDevice(user, p.client_id, p.name);
+      return ok();
+    },
+
+    // The PC tells what happened: a play session on the Switch ended, or a game was closed.
+    async 'host/report'(p) {
+      const user = await userFromToken(p.token);
+      if (!user) return fail(401, 'auth');
+      if (!HEX16_RE.test(p.host_id || '')) return fail(400, 'invalid');
+      const host = await store.get(`host/${user}/${p.host_id}`);
+      const pc = host?.name || 'PC';
+      const seconds = Math.max(0, Math.min(86_400 * 2, Number.parseInt(p.seconds, 10) || 0));
+      if (p.kind === 'session') {
+        await addLog(user, {
+          kind: 'session', pc, device: cleanName(p.client, 32) || 'Switch',
+          via: p.via === 'casa' ? 'casa' : 'internet', seconds, game: cleanName(p.game, 80),
+        });
+        return ok();
+      }
+      if (p.kind === 'game') {
+        const title = cleanName(p.title, 80);
+        if (!title) return fail(400, 'invalid');
+        const program = /^[0-9a-f]{16}$/.test(p.program || '') ? p.program : null;
+        const gameKey = `game/${user}/${program || crypto.createHash('sha1').update(title).digest('hex').slice(0, 16)}`;
+        const current = (await store.get(gameKey)) || { seconds: 0, sessions: 0 };
+        await store.set(gameKey, {
+          title, program, pc, seconds: current.seconds + seconds,
+          sessions: current.sessions + 1, last: Date.now(),
+        });
+        await addLog(user, { kind: 'game', pc, title, seconds, streamed: p.streamed === '1' });
+        return ok();
+      }
+      return fail(400, 'invalid');
+    },
+
+    // Everything for the web panel, as JSON
+    async panel(p) {
+      const user = await userFromToken(p.token);
+      if (!user) return fail(401, 'auth');
+      const now = Date.now();
+      const record = await store.get(`user/${user}`);
+      const load = async (prefix) => {
+        const items = [];
+        for (const key of await store.list(prefix)) {
+          const value = await store.get(key);
+          if (value) items.push({ id: key.split('/').pop(), ...value });
+        }
+        return items;
+      };
+      const hosts = (await load(`host/${user}/`)).map((h) => ({
+        id: h.id, name: h.name, seen: h.seen, online: now - h.seen < HOST_ONLINE_MS,
+        game: now - h.seen < HOST_ONLINE_MS ? h.game || '' : '', game_since: h.game_since || null,
+        home: h.local.some((a) => /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(a)),
+        router: h.local.some((a) => !/^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.)/.test(a)),
+        internet: Boolean(h.public),
+      }));
+      const devices = (await load(`device/${user}/`)).sort((a, b) => b.last - a.last);
+      const games = (await load(`game/${user}/`)).sort((a, b) => b.last - a.last);
+      const logKeys = (await store.list(`log/${user}/`)).sort().reverse().slice(0, 120);
+      const log = [];
+      for (const key of logKeys) {
+        const value = await store.get(key);
+        if (value) log.push(value);
+      }
+      return okJson({ user, created: record?.created ?? null, now, hosts, devices, games, log });
+    },
+
+    async 'device/remove'(p) {
+      const user = await userFromToken(p.token);
+      if (!user) return fail(401, 'auth');
+      if (!HEX16_RE.test(p.client_id || '')) return fail(400, 'invalid');
+      await store.delete(`device/${user}/${p.client_id}`);
       return ok();
     },
   };

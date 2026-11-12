@@ -2367,6 +2367,9 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
             std::filesystem::path{Common::U16StringFromBuffer(filename.utf16(), filename.size())}
                 .filename());
     }
+    if (charis_stream) {
+        charis_stream->GameStarted(QString::fromStdString(title_name), title_id);
+    }
     const bool is_64bit = QtCommon::system->Kernel().ApplicationProcess()->Is64Bit();
     const auto instruction_set_suffix = is_64bit ? tr("(64-bit)") : tr("(32-bit)");
     title_name = tr("%1 %2", "%1 is the title name. %2 indicates if the title is 64-bit or 32-bit")
@@ -2493,6 +2496,9 @@ void MainWindow::OnEmulationStopped() {
     }
     if (QtCommon::emu_thread && QtCommon::emu_thread->isRunning()) {
         return;
+    }
+    if (charis_stream) {
+        charis_stream->GameStopped();
     }
     shutdown_timer.stop();
     emu_terminate_timer.stop();

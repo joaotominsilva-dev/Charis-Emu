@@ -109,6 +109,8 @@ Saved Load() {
     saved.user = values["user"];
     saved.token = values["token"];
     saved.key_hex = values["key"];
+    saved.auth_hex = values["auth"];
+    saved.create_pending = values["create_pending"] == "1";
     saved.client_id = values["client"];
     saved.last_host = values["last_host"];
     saved.quality = std::atoi(values["quality"].c_str());
@@ -129,6 +131,8 @@ void Store(const Saved& saved) {
     file << "user=" << saved.user << "\n"
          << "token=" << saved.token << "\n"
          << "key=" << saved.key_hex << "\n"
+         << "auth=" << saved.auth_hex << "\n"
+         << "create_pending=" << (saved.create_pending ? "1" : "0") << "\n"
          << "client=" << saved.client_id << "\n"
          << "last_host=" << saved.last_host << "\n"
          << "quality=" << saved.quality << "\n";

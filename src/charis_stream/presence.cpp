@@ -18,12 +18,12 @@ constexpr int64_t MaxBackoffMs = 30000;
 
 } // namespace
 
-Presence::Presence(Http& http_, Host& host_, std::string token_, std::string host_id_,
+Presence::Presence(Http& http_, Host& host_, Credentials credentials_, std::string host_id_,
                    std::string name_, std::function<void(const Status&)> on_status_,
-                   std::string server_url_)
-    : http{http_}, host{host_}, token{std::move(token_)}, host_id{std::move(host_id_)},
-      name{std::move(name_)}, on_status{std::move(on_status_)},
-      server_url{std::move(server_url_)} {}
+                   std::function<void(const std::string&)> on_token_, std::string server_url_)
+    : http{http_}, host{host_}, host_id{std::move(host_id_)}, name{std::move(name_)},
+      on_status{std::move(on_status_)}, on_token{std::move(on_token_)},
+      server_url{std::move(server_url_)}, credentials{std::move(credentials_)} {}
 
 Presence::~Presence() {
     Stop();
@@ -37,13 +37,7 @@ void Presence::Start() {
 }
 
 void Presence::Stop() {
-    if (!running.exchange(false)) {
-        if (thread.joinable()) {
-            thread.join();
-        }
-        return;
-    }
-    {
+    if (running.exchange(false)) {
         std::scoped_lock lock{mutex};
         wake.notify_all();
     }
@@ -57,10 +51,69 @@ Presence::Status Presence::GetStatus() const {
     return status;
 }
 
+std::string Presence::Token() const {
+    std::scoped_lock lock{mutex};
+    return credentials.token;
+}
+
+void Presence::SetGame(const std::string& title) {
+    std::scoped_lock lock{mutex};
+    if (game != title) {
+        game = title;
+        poke = true; // tell the account right away
+        wake.notify_all();
+    }
+}
+
 bool Presence::WaitFor(int64_t ms) {
     std::unique_lock lock{mutex};
-    wake.wait_for(lock, std::chrono::milliseconds(ms), [this] { return !running.load(); });
+    wake.wait_for(lock, std::chrono::milliseconds(ms), [this] { return !running.load() || poke; });
+    poke = false;
     return running;
+}
+
+// Gets a token when there is none (the server was down at login, or the old one expired).
+// False while it cannot; next tells why.
+bool Presence::EnsureToken(Account& account, Status& next) {
+    Credentials current;
+    {
+        std::scoped_lock lock{mutex};
+        current = credentials;
+    }
+    if (!current.token.empty()) {
+        return true;
+    }
+    if (current.user.empty() || current.auth_hex.empty()) {
+        next.login_expired = true;
+        next.message = "Entre na conta de novo.";
+        return false;
+    }
+    std::string token;
+    std::string error;
+    if (current.create_account) {
+        error = account.Register(current.user, current.auth_hex, token, "pc", name);
+        if (!error.empty() && !account.Unavailable()) {
+            // Already there (made on the Switch meanwhile, with the same password): log in
+            error = account.Login(current.user, current.auth_hex, token, "pc", name);
+        }
+    } else {
+        error = account.Login(current.user, current.auth_hex, token, "pc", name);
+    }
+    if (!error.empty()) {
+        next.online = false;
+        next.message = error;
+        next.login_expired = !account.Unavailable();
+        return false;
+    }
+    {
+        std::scoped_lock lock{mutex};
+        credentials.token = token;
+        credentials.create_account = false;
+    }
+    if (on_token) {
+        on_token(token);
+    }
+    return true;
 }
 
 void Presence::Loop() {
@@ -106,17 +159,40 @@ void Presence::Loop() {
             break;
         }
 
+        int64_t wait_ms = backoff_ms;
+        if (!EnsureToken(account, next)) {
+            if (next.login_expired) {
+                publish(next);
+                break; // a wrong password needs the user
+            }
+            backoff_ms = std::min(backoff_ms * 2, MaxBackoffMs);
+            publish(next);
+            if (!WaitFor(wait_ms)) {
+                break;
+            }
+            continue;
+        }
+
         std::vector<Address> addresses = host.LocalAddresses();
         if (next.router_port && addresses.size() < 4) {
             addresses.push_back(mapping.External());
         }
+        std::string token;
+        std::string playing;
+        {
+            std::scoped_lock lock{mutex};
+            token = credentials.token;
+            playing = game;
+        }
         std::vector<ConnectRequest> requests;
         int next_poll_ms = 10000;
         const std::string error = account.HostPoll(token, host_id, name, addresses,
-                                                   host.PublicAddress(), requests, next_poll_ms);
-        int64_t wait_ms = next_poll_ms;
+                                                   host.PublicAddress(), requests, next_poll_ms,
+                                                   playing);
+        wait_ms = next_poll_ms;
         if (error.empty()) {
             next.online = true;
+            next.login_expired = false;
             next.message.clear();
             backoff_ms = 2000;
             for (const ConnectRequest& request : requests) {
@@ -128,11 +204,10 @@ void Presence::Loop() {
                 wait_ms = AfterRequestMs;
             }
         } else if (account.LoginExpired()) {
-            next.online = false;
-            next.login_expired = true;
-            next.message = error;
-            publish(next);
-            break; // nothing more to do until the user logs in again
+            // The token is too old: log in again with the saved code on the next round
+            std::scoped_lock lock{mutex};
+            credentials.token.clear();
+            wait_ms = 500;
         } else {
             next.online = false;
             next.message = error;

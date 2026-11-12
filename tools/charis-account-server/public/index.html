@@ -1,17 +1,141 @@
 <!doctype html>
 <html lang="pt-BR">
+<head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Charis Conta</title>
+<meta name="theme-color" content="#20211C">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%2320211C'/%3E%3Cpath d='M44 22a14 14 0 1 0 0 20' fill='none' stroke='%23F3F4EA' stroke-width='7' stroke-linecap='round'/%3E%3C/svg%3E">
 <style>
-  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #20211C;
-         color: #F3F4EA; font: 18px/1.5 system-ui, sans-serif; }
-  main { max-width: 32rem; padding: 2rem; }
-  h1 { font-size: 2rem; margin: 0 0 .5rem; }
-  p { color: #A9AA98; margin: 0; }
+  @font-face { font-family: Archivo; font-weight: 400; src: url(fonts/Archivo-400.ttf) format('truetype'); font-display: swap; }
+  @font-face { font-family: Archivo; font-weight: 700; src: url(fonts/Archivo-700.ttf) format('truetype'); font-display: swap; }
+  @font-face { font-family: Archivo; font-weight: 800; src: url(fonts/Archivo-800.ttf) format('truetype'); font-display: swap; }
+  :root {
+    --graphite: #20211C; --graphite-2: #2C2D27; --cream: #F3F4EA; --cream-2: #E9EADD;
+    --cream-3: #DEDFD1; --sage: #C8C9B7; --ink: #1D1E19; --ink-soft: #55564B;
+    --on-dark-soft: #A9AA98; --danger: #953521; --good: #4E6B3A;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body { background: linear-gradient(var(--graphite) 0 320px, var(--cream) 320px); color: var(--ink); font: 16px/1.5 Archivo, system-ui, sans-serif;
+         -webkit-font-smoothing: antialiased; min-height: 100vh; }
+  button, input { font: inherit; }
+  .top { color: var(--cream); padding: 28px 24px 56px; max-width: 1080px; margin: 0 auto; }
+  .brand { display: flex; align-items: center; gap: 12px; font-weight: 700; }
+  .brand svg { width: 32px; height: 32px; }
+  .brand .grow { flex: 1; }
+  .eyebrow { color: var(--on-dark-soft); font-size: 12px; font-weight: 700; letter-spacing: 2px; text-transform: uppercase; margin: 28px 0 4px; }
+  h1 { font-weight: 800; font-size: clamp(32px, 6vw, 48px); line-height: 1.08; margin: 0; letter-spacing: -0.5px; }
+  .sheet { background: var(--cream); border-radius: 32px 32px 0 0; min-height: 60vh; padding: 32px 24px 64px; }
+  .sheet > .inner { max-width: 1080px; margin: 0 auto; }
+  .pill { border: 0; border-radius: 999px; padding: 8px 16px; font-weight: 700; font-size: 14px; cursor: pointer;
+          background: var(--graphite-2); color: var(--cream); }
+  .pill:hover { background: #3a3b33; }
+  .card { background: var(--cream-2); border-radius: 22px; padding: 20px 22px; }
+  .muted { color: var(--ink-soft); }
+  .small { font-size: 14px; }
+  h2 { font-size: 13px; letter-spacing: 2px; text-transform: uppercase; color: var(--ink-soft); margin: 36px 0 12px; font-weight: 700; }
+  h3 { margin: 0; font-size: 18px; font-weight: 800; }
+
+  /* Login */
+  .login { max-width: 460px; }
+  .login label { display: block; font-size: 13px; font-weight: 700; letter-spacing: 1px; color: var(--ink-soft); margin: 18px 0 6px; text-transform: uppercase; }
+  .login input { width: 100%; border: 2px solid transparent; background: var(--cream-2); border-radius: 16px; padding: 14px 16px; font-size: 17px; color: var(--ink); outline: none; }
+  .login input:focus { border-color: var(--graphite); background: var(--cream-3); }
+  .primary { margin-top: 24px; width: 100%; border: 0; border-radius: 18px; padding: 16px; font-weight: 800; font-size: 17px;
+             background: var(--graphite); color: var(--cream); cursor: pointer; }
+  .primary:disabled { opacity: .6; cursor: progress; }
+  .error { margin-top: 16px; background: var(--danger); color: var(--cream); border-radius: 16px; padding: 12px 16px; font-weight: 700; }
+  .hint { margin-top: 28px; }
+
+  /* Dashboard */
+  .now { background: var(--graphite); color: var(--cream); border-radius: 24px; padding: 22px 24px; display: flex; gap: 18px; align-items: center; }
+  .now .dot { width: 14px; height: 14px; border-radius: 50%; flex: none; background: var(--sage); }
+  .now .dot.on { background: #7FA35F; box-shadow: 0 0 0 6px rgba(127, 163, 95, .18); }
+  .now .title { font-weight: 800; font-size: 20px; }
+  .now .sub { color: var(--on-dark-soft); font-size: 14px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; }
+  .pc { display: flex; flex-direction: column; gap: 10px; }
+  .row { display: flex; align-items: center; gap: 10px; }
+  .row .grow { flex: 1; min-width: 0; }
+  .status { font-size: 13px; font-weight: 700; border-radius: 999px; padding: 4px 10px; background: var(--cream-3); color: var(--ink-soft); white-space: nowrap; }
+  .status.on { background: #DCE6D0; color: var(--good); }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { font-size: 12px; font-weight: 700; padding: 4px 9px; border-radius: 999px; background: var(--cream); color: var(--ink-soft); }
+  .chip.yes { color: var(--good); }
+  .link { border: 0; background: none; color: var(--ink-soft); font-size: 13px; font-weight: 700; cursor: pointer; padding: 0; text-decoration: underline; text-underline-offset: 3px; }
+  .link:hover { color: var(--danger); }
+  .games { display: grid; gap: 8px; }
+  .game { display: grid; grid-template-columns: 1fr auto; gap: 4px 16px; align-items: center; }
+  .game .time { font-weight: 800; font-size: 18px; text-align: right; }
+  .bar { grid-column: 1 / -1; height: 6px; border-radius: 6px; background: var(--cream-3); overflow: hidden; }
+  .bar span { display: block; height: 100%; background: var(--graphite); border-radius: 6px; }
+  .day { font-weight: 800; margin: 18px 0 8px; font-size: 15px; }
+  .event { display: grid; grid-template-columns: 52px 28px 1fr; gap: 10px; align-items: start; padding: 10px 0; border-top: 1px solid var(--cream-3); }
+  .event:first-of-type { border-top: 0; }
+  .event .hour { color: var(--ink-soft); font-size: 14px; font-variant-numeric: tabular-nums; padding-top: 2px; }
+  .event .icon { width: 28px; height: 28px; border-radius: 9px; background: var(--cream-3); display: grid; place-items: center; }
+  .event .icon svg { width: 16px; height: 16px; }
+  .event .what { font-weight: 700; }
+  .event .detail { color: var(--ink-soft); font-size: 14px; }
+  .empty { color: var(--ink-soft); padding: 8px 0; }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+  @media (max-width: 760px) { .two { grid-template-columns: 1fr; } }
+  .foot { margin-top: 40px; font-size: 13px; color: var(--ink-soft); }
+  [hidden] { display: none !important; }
 </style>
-<main>
-  <h1>Charis Conta</h1>
-  <p>Este endereço liga o Charis Switch do seu PC ao app Charis Stream do seu Switch. Não há nada para abrir aqui: entre com a sua conta nos dois aplicativos.</p>
-</main>
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <svg viewBox="0 0 64 64" aria-hidden="true"><path d="M44 22a14 14 0 1 0 0 20" fill="none" stroke="#F3F4EA" stroke-width="7" stroke-linecap="round"/></svg>
+      <span>Charis Conta</span>
+      <span class="grow"></span>
+      <button class="pill" id="logout" hidden>Sair</button>
+    </div>
+    <div class="eyebrow" id="eyebrow">Charis Switch e Charis Stream</div>
+    <h1 id="heading">Entre na sua conta</h1>
+  </header>
+
+  <main class="sheet">
+    <div class="inner">
+      <form class="login" id="login-form" autocomplete="on">
+        <p class="muted">Use a mesma conta do Charis Switch no PC e do Charis Stream no Switch.</p>
+        <label for="user">Usuário</label>
+        <input id="user" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="24" required>
+        <label for="password">Senha</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required>
+        <button class="primary" id="submit" type="submit">Entrar</button>
+        <div class="error" id="login-error" hidden></div>
+        <p class="hint muted small">Ainda não tem conta? Crie pelo Charis Switch no PC (botão "Jogar no Switch") ou pelo app no Switch.</p>
+      </form>
+
+      <section id="panel" hidden>
+        <div class="now" id="now"></div>
+
+        <h2>Meus PCs</h2>
+        <div class="grid" id="pcs"></div>
+
+        <div class="two">
+          <div>
+            <h2>Jogos</h2>
+            <div class="card games" id="games"></div>
+          </div>
+          <div>
+            <h2>Meus Switches</h2>
+            <div class="card" id="devices"></div>
+          </div>
+        </div>
+
+        <h2>Histórico</h2>
+        <div class="card" id="history"></div>
+        <p class="foot" id="foot"></p>
+      </section>
+    </div>
+  </main>
+
+  <script src="vendor/argon2.umd.min.js"></script>
+  <script src="vendor/blake2b.umd.min.js"></script>
+  <script src="panel.js"></script>
+</body>
 </html>

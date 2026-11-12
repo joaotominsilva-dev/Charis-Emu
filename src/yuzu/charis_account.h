@@ -19,17 +19,24 @@ class CharisStreamController;
 // folder; the login token and the stream key are sealed to the Windows user (DPAPI).
 struct CharisAccountData {
     QString user;
-    QString token;
+    QString token;     // empty while the account server has not confirmed the login yet
+    QString auth_hex;  // lets the PC log in again by itself
+    bool create_pending = false; // made while the server was down: register it when it is back
     CharisStream::Key32 stream_key{};
 
     bool IsLoggedIn() const {
-        return !user.isEmpty() && !token.isEmpty();
+        bool has_key = false;
+        for (const uint8_t byte : stream_key) {
+            has_key |= byte != 0;
+        }
+        return !user.isEmpty() && has_key;
     }
 };
 
 namespace CharisAccountStore {
 CharisAccountData Load();
 void Save(const CharisAccountData& account);
+void SaveToken(const QString& token); // the PC logged in again by itself
 void Clear();
 // Stable id of this PC on the account (16 hex characters), made once
 QString HostId();
