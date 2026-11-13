@@ -30,6 +30,7 @@
 #include "media.h"
 #include "platform.h"
 #include "ui.h"
+#include "version.h"
 
 using namespace CharisStream;
 
@@ -94,7 +95,7 @@ private:
     std::vector<std::function<void()>> results;
 };
 
-enum class Screen { Login, Hosts, Connecting, Streaming, Message };
+enum class Screen { Login, Hosts, Connecting, Streaming, Message, Updating };
 
 struct Entry {
     std::string id;
@@ -106,9 +107,29 @@ struct Entry {
 
 constexpr const char* QualityNames[] = {"Automática", "Máxima", "Leve"};
 
+// Where new versions of this app are published (switch.txt says which is the newest)
+std::string UpdateUrl() {
+    const char* custom = std::getenv("CHARIS_UPDATE_URL");
+    return custom != nullptr ? custom : "https://charis-conta.netlify.app/atualizacoes/";
+}
+
+// "2.0.10" > "2.0.9"
+bool Newer(const std::string& candidate, const std::string& current) {
+    int a[3] = {0, 0, 0};
+    int b[3] = {0, 0, 0};
+    std::sscanf(candidate.c_str(), "%d.%d.%d", &a[0], &a[1], &a[2]);
+    std::sscanf(current.c_str(), "%d.%d.%d", &b[0], &b[1], &b[2]);
+    for (int i = 0; i < 3; ++i) {
+        if (a[i] != b[i]) {
+            return a[i] > b[i];
+        }
+    }
+    return false;
+}
+
 class App {
 public:
-    int Run();
+    int Run(int argc, char** argv);
 
 private:
     // Screens
@@ -135,6 +156,12 @@ private:
     void StopStreaming(const std::string& title, const std::string& why);
     void MenuChoose();
     void Toast(const std::string& text, int ms = 2500);
+    void CheckForUpdate();
+    void StartUpdate();
+    void UpdatingFrame();
+    void DrawUpdating();
+    void DrawUpdatePill();
+    bool UpdateAvailable();
     uint32_t BitrateFor(bool home) const;
     bool Tapped(const Rect& rect) const;
 
@@ -205,7 +232,174 @@ private:
     // Message
     std::string message_title;
     std::string message_text;
+    bool quit_after_message = false;
+
+    // Self update
+    std::mutex update_mutex;
+    std::string update_version; // newer version found on the server ("" for none)
+    std::string update_file;
+    std::atomic<int64_t> update_received{0};
+    std::atomic<int64_t> update_total{0};
+    std::atomic<int> update_state{0}; // 0 idle, 1 downloading, 2 done, 3 failed
+    std::string update_error;
+    Rect update_rect;
 };
+
+void App::CheckForUpdate() {
+    if (Platform::SelfPath().empty()) {
+        return; // started from a place we cannot replace (or a PC test run)
+    }
+    side_threads.emplace_back([this] {
+        std::string text;
+        if (!Platform::FetchText(UpdateUrl() + "switch.txt", text)) {
+            return;
+        }
+        std::string version;
+        std::string file;
+        size_t at = 0;
+        while (at < text.size()) {
+            size_t end = text.find('\n', at);
+            if (end == std::string::npos) {
+                end = text.size();
+            }
+            std::string line = text.substr(at, end - at);
+            while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) {
+                line.pop_back();
+            }
+            if (line.rfind("versao=", 0) == 0) {
+                version = line.substr(7);
+            } else if (line.rfind("arquivo=", 0) == 0) {
+                file = line.substr(8);
+            }
+            at = end + 1;
+        }
+        const bool safe_name = !file.empty() && file.find('/') == std::string::npos &&
+                               file.size() > 4 && file.substr(file.size() - 4) == ".nro";
+        if (safe_name && Newer(version, CHARIS_APP_VERSION)) {
+            std::scoped_lock lock{update_mutex};
+            update_version = version;
+            update_file = file;
+            Platform::Log("atualizacao disponivel: %s", version.c_str());
+        }
+    });
+}
+
+bool App::UpdateAvailable() {
+    std::scoped_lock lock{update_mutex};
+    return !update_version.empty();
+}
+
+void App::StartUpdate() {
+    std::string version;
+    std::string file;
+    {
+        std::scoped_lock lock{update_mutex};
+        version = update_version;
+        file = update_file;
+    }
+    if (version.empty() || update_state == 1) {
+        return;
+    }
+    update_state = 1;
+    update_received = 0;
+    update_total = 0;
+    screen = Screen::Updating;
+    Platform::Log("baixando a versao %s", version.c_str());
+    side_threads.emplace_back([this, version, file] {
+        const std::string target = Platform::SelfPath();
+        const std::string partial = target + ".novo";
+        std::string error;
+        if (!Platform::DownloadFile(UpdateUrl() + file, partial, [this](int64_t got, int64_t total) {
+                update_received = got;
+                update_total = total;
+            })) {
+            error = "O download não terminou. Confira a internet e tente de novo.";
+        } else {
+            // A real Switch homebrew file says "NRO0" at byte 16
+            char magic[4] = {};
+            FILE* check = std::fopen(partial.c_str(), "rb");
+            if (check != nullptr) {
+                std::fseek(check, 16, SEEK_SET);
+                if (std::fread(magic, 1, 4, check) != 4) {
+                    magic[0] = 0;
+                }
+                std::fclose(check);
+            }
+            if (std::memcmp(magic, "NRO0", 4) != 0) {
+                error = "O arquivo baixado não é o app. Tente de novo mais tarde.";
+                std::remove(partial.c_str());
+            } else {
+                // The running copy is already in memory: replace the file on the SD card
+                std::remove(target.c_str());
+                if (std::rename(partial.c_str(), target.c_str()) != 0) {
+                    error = "Não consegui trocar o arquivo no cartão SD.";
+                }
+            }
+        }
+        std::scoped_lock lock{update_mutex};
+        update_error = error;
+        update_state = error.empty() ? 2 : 3;
+        Platform::Log("atualizacao %s: %s", version.c_str(), error.empty() ? "ok" : error.c_str());
+    });
+}
+
+void App::UpdatingFrame() {
+    const int state = update_state;
+    if (state == 2) {
+        message_title = "Atualizado";
+        {
+            std::scoped_lock lock{update_mutex};
+            message_text = "O Charis Stream foi atualizado para a versão " + update_version +
+                           ". Aperte A para fechar e depois abra o app de novo.";
+            update_version.clear();
+        }
+        quit_after_message = true;
+        screen = Screen::Message;
+        update_state = 0;
+    } else if (state == 3) {
+        message_title = "Não deu para atualizar";
+        {
+            std::scoped_lock lock{update_mutex};
+            message_text = update_error;
+        }
+        screen = Screen::Message;
+        update_state = 0;
+    }
+}
+
+void App::DrawUpdating() {
+    ui.Page("CHARIS STREAM", "Atualizando", 196);
+    const int64_t total = update_total;
+    const int64_t got = update_received;
+    const int percent = total > 0 ? static_cast<int>(got * 100 / total) : 0;
+    ui.Text(ui.title, total > 0 ? std::to_string(percent) + "%" : "Baixando", 72, 240, Ink);
+    ui.Box({72, 310, 1136, 22}, 11, Cream3);
+    if (total > 0) {
+        ui.Box({72, 310, std::max(22, static_cast<int>(1136 * got / total)), 22}, 11, Charcoal);
+    }
+    ui.Paragraph(ui.body, "Não feche o app até terminar. Depois é só abrir de novo.", 72, 360,
+                 1136, InkSoft);
+}
+
+// A pill in the header when a newer version is out: R (or a tap) updates
+void App::DrawUpdatePill() {
+    std::string version;
+    {
+        std::scoped_lock lock{update_mutex};
+        version = update_version;
+    }
+    if (version.empty()) {
+        update_rect = {};
+        return;
+    }
+    const std::string label = "Atualizar para " + version;
+    const int w = ui.Measure(ui.bold, label) + 84;
+    update_rect = {ScreenW - 72 - w, 60, w, 48};
+    ui.Box(update_rect, 24, Cream);
+    ui.Circle(update_rect.x + 30, update_rect.y + 24, 15, Charcoal);
+    ui.Text(ui.bold, "R", update_rect.x + 30, update_rect.y + 11, Cream, 1);
+    ui.Text(ui.bold, label, update_rect.x + 56, update_rect.y + 11, Ink);
+}
 
 bool App::Tapped(const Rect& rect) const {
     return tap_x >= 0 && rect.Contains(tap_x, tap_y);
@@ -325,6 +519,10 @@ void App::Logout(const std::string& why) {
 }
 
 void App::LoginFrame(uint64_t pressed) {
+    if (((pressed & ButtonR) || Tapped(update_rect)) && UpdateAvailable()) {
+        StartUpdate();
+        return;
+    }
     if (background.Busy()) {
         return;
     }
@@ -391,6 +589,7 @@ void App::LoginFrame(uint64_t pressed) {
 
 void App::DrawLogin() {
     ui.Page("CHARIS STREAM", form_create ? "Criar conta" : "Entre na sua conta", 196);
+    DrawUpdatePill();
     ui.Paragraph(ui.body,
                  form_create ? "Escolha um usuário e uma senha. Depois entre com eles no Charis "
                                "Switch do PC e pronto: sem configurar IP."
@@ -568,6 +767,11 @@ void App::BuildEntries() {
 }
 
 void App::HostsFrame(uint64_t pressed) {
+    if (((pressed & ButtonR) || Tapped(update_rect)) && UpdateAvailable()) {
+        auto_connect_done = true;
+        StartUpdate();
+        return;
+    }
     if (now - last_list_ms > 15000) {
         RefreshHosts(); // also tells the PCs of the account that a Switch is looking
     }
@@ -637,6 +841,7 @@ void App::HostsFrame(uint64_t pressed) {
 
 void App::DrawHosts() {
     ui.Page("CHARIS STREAM · " + saved.user, "Seus PCs", 196);
+    DrawUpdatePill();
     entry_rects.clear();
     if (entries.empty()) {
         ui.Text(ui.title, list_loaded ? "Nenhum PC ligado ainda" : "Procurando seus PCs", 72, 240,
@@ -1085,6 +1290,10 @@ void App::DrawMenu() {
 // ---------- Message ----------
 
 void App::MessageFrame(uint64_t pressed) {
+    if (quit_after_message && (pressed & (ButtonA | ButtonB | ButtonPlus))) {
+        quit = true;
+        return;
+    }
     if (pressed & (ButtonA | ButtonB)) {
         screen = client ? Screen::Hosts : Screen::Login;
         last_list_ms = -100000;
@@ -1094,13 +1303,13 @@ void App::MessageFrame(uint64_t pressed) {
 void App::DrawMessage() {
     ui.Page("CHARIS STREAM", message_title, 196);
     ui.Paragraph(ui.body, message_text, 72, 240, 1136, InkSoft);
-    ui.Hint(72, ScreenH - 62, "A", "Voltar", false);
+    ui.Hint(72, ScreenH - 62, "A", quit_after_message ? "Fechar o app" : "Voltar", false);
 }
 
 // ---------- Main loop ----------
 
-int App::Run() {
-    Platform::Init();
+int App::Run(int argc, char** argv) {
+    Platform::Init(argc, argv);
     SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER);
     TTF_Init();
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "1");
@@ -1124,8 +1333,9 @@ int App::Run() {
     pads.Open();
     http = Platform::MakeHttp();
     saved = Platform::Load();
-    Platform::Log("Charis Stream 2.0.2, tela %dx%d, %s", output_w, output_h,
+    Platform::Log("Charis Stream %s, tela %dx%d, %s", CHARIS_APP_VERSION, output_w, output_h,
                   Platform::Docked() ? "na TV" : "portatil");
+    CheckForUpdate();
     form_user = saved.user;
 
     // Automated runs on a PC: CHARIS_USER and CHARIS_PASSWORD log in by themselves
@@ -1158,6 +1368,11 @@ int App::Run() {
         const int dt_ms = static_cast<int>(now - last_frame);
         last_frame = now;
         background.ApplyResults();
+        // Automated runs on a PC: take an offered update by itself
+        if (std::getenv("CHARIS_AUTOUPDATE") != nullptr && screen != Screen::Updating &&
+            screen != Screen::Message && update_state == 0 && UpdateAvailable()) {
+            StartUpdate();
+        }
 
         const PadSnapshot pad = pads.Read();
         const uint64_t pressed = pad.buttons & ~previous_buttons;
@@ -1196,6 +1411,9 @@ int App::Run() {
         case Screen::Message:
             MessageFrame(pressed);
             break;
+        case Screen::Updating:
+            UpdatingFrame();
+            break;
         }
 
         switch (screen) {
@@ -1216,6 +1434,9 @@ int App::Run() {
             break;
         case Screen::Message:
             DrawMessage();
+            break;
+        case Screen::Updating:
+            DrawUpdating();
             break;
         }
         SDL_RenderPresent(renderer);
@@ -1263,7 +1484,7 @@ int App::Run() {
 
 } // namespace
 
-int main(int, char**) {
+int main(int argc, char** argv) {
     App app;
-    return app.Run();
+    return app.Run(argc, argv);
 }

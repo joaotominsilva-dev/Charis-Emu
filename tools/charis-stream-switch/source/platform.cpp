@@ -117,7 +117,110 @@ void Log(const char* format, ...) {
     std::fflush(log_file);
 }
 
-void Init() {
+namespace {
+std::string self_path;
+
+size_t WriteToFile(char* data, size_t size, size_t count, void* user) {
+    return std::fwrite(data, size, count, static_cast<FILE*>(user)) * size;
+}
+
+struct DownloadProgress {
+    const std::function<void(int64_t, int64_t)>* callback;
+};
+
+int DownloadProgressCallback(void* user, curl_off_t total, curl_off_t received, curl_off_t,
+                             curl_off_t) {
+    if (http_cancelled) {
+        return 1;
+    }
+    auto* progress = static_cast<DownloadProgress*>(user);
+    if (progress->callback != nullptr && *progress->callback) {
+        (*progress->callback)(received, total);
+    }
+    return 0;
+}
+
+CURL* NewGet(const std::string& url) {
+    CURL* curl = curl_easy_init();
+    if (curl == nullptr) {
+        return nullptr;
+    }
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "CharisStream/2.0");
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 8L);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_FAILONERROR, 1L);
+    return curl;
+}
+} // namespace
+
+bool FetchText(const std::string& url, std::string& out) {
+    out.clear();
+    if (http_cancelled) {
+        return false;
+    }
+    CURL* curl = NewGet(url);
+    if (curl == nullptr) {
+        return false;
+    }
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, Collect);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &out);
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, Progress);
+    const CURLcode result = curl_easy_perform(curl);
+    curl_easy_cleanup(curl);
+    return result == CURLE_OK;
+}
+
+bool DownloadFile(const std::string& url, const std::string& path,
+                  const std::function<void(int64_t, int64_t)>& progress) {
+    if (http_cancelled) {
+        return false;
+    }
+    FILE* file = std::fopen(path.c_str(), "wb");
+    if (file == nullptr) {
+        return false;
+    }
+    CURL* curl = NewGet(url);
+    bool ok = false;
+    if (curl != nullptr) {
+        DownloadProgress state{&progress};
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteToFile);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, file);
+        curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+        curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, DownloadProgressCallback);
+        curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &state);
+        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1024L); // stalled for 30 s: give up
+        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 30L);
+        ok = curl_easy_perform(curl) == CURLE_OK;
+        curl_easy_cleanup(curl);
+    }
+    ok = std::fclose(file) == 0 && ok;
+    if (!ok) {
+        std::remove(path.c_str());
+    }
+    return ok;
+}
+
+std::string SelfPath() {
+    return self_path;
+}
+
+void Init(int argc, char** argv) {
+#ifdef __SWITCH__
+    // hbloader passes the .nro's own path as the first argument
+    if (argc > 0 && argv[0] != nullptr && std::strstr(argv[0], ".nro") != nullptr) {
+        self_path = argv[0];
+    }
+#else
+    (void)argc;
+    (void)argv;
+    if (const char* custom = std::getenv("CHARIS_SELF_PATH")) {
+        self_path = custom;
+    }
+#endif
 #ifdef __SWITCH__
     socketInitializeDefault();
     romfsInit();

@@ -13,9 +13,9 @@ class QNetworkAccessManager;
 class QProgressBar;
 class QPushButton;
 
-// Updates from a shared Google Drive folder: the newest "CharisSwitch-X.Y.Z-instalador.exe"
-// in it (or in one of its subfolders) is downloaded and installed silently, then the program
-// reopens.
+// Updates from the Charis account server (charis-conta.netlify.app/atualizacoes/pc.txt) and
+// from the shared Google Drive folder: the newest "CharisSwitch-X.Y.Z-instalador.exe" found in
+// either is downloaded and installed silently, then the program reopens.
 class CharisUpdater : public QObject {
     Q_OBJECT
 
@@ -47,13 +47,15 @@ signals:
 private:
     explicit CharisUpdater(QObject* parent = nullptr);
     void ListFolder(const QString& folder_id, int depth);
+    void CheckServer();
+    void Consider(const QString& version, const QString& url);
     void FinishListing();
 
     QNetworkAccessManager* net = nullptr;
     int open_listings = 0;
     bool busy = false;
     QString found_version;
-    QString found_file_id;
+    QString found_url;
     QString installer_path;
 };
 

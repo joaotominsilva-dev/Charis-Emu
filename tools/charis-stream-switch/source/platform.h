@@ -6,6 +6,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -13,7 +14,7 @@
 
 namespace Platform {
 
-void Init();
+void Init(int argc, char** argv);
 // One line in the app's log on the SD card (config/charis-stream/log.txt), printf style
 void Log(const char* format, ...) __attribute__((format(printf, 1, 2)));
 void Exit();
@@ -37,6 +38,13 @@ void Store(const Saved& saved);
 std::unique_ptr<CharisStream::Http> MakeHttp();
 // The app is closing: requests in progress give up at once, new ones fail right away
 void CancelHttp();
+
+// Updates: a small text file, and a big file saved straight to the SD card
+bool FetchText(const std::string& url, std::string& out);
+bool DownloadFile(const std::string& url, const std::string& path,
+                  const std::function<void(int64_t received, int64_t total)>& progress);
+// Where this app's .nro is on the SD card ("" when unknown: no self update)
+std::string SelfPath();
 
 // The system keyboard. Returns false when the user cancelled.
 bool Keyboard(const std::string& header, const std::string& guide, const std::string& initial,

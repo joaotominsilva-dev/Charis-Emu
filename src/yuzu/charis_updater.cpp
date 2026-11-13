@@ -27,6 +27,8 @@ namespace {
 
 // The Charis Google Drive folder where new installers are published
 constexpr char UpdateFolderId[] = "1P2t73x12kJYaz3Xo4rmdZ7bUWmF1SInQ";
+// And the account server, which takes files of any size
+constexpr char UpdateServer[] = "https://charis-conta.netlify.app/atualizacoes/";
 
 const QRegularExpression InstallerName(
     QStringLiteral("^CharisSwitch-(\\d+\\.\\d+\\.\\d+)-instalador\\.exe$"),
@@ -52,7 +54,9 @@ CharisUpdater::CharisUpdater(QObject* parent) : QObject(parent) {
 }
 
 QString CharisUpdater::CurrentVersion() {
-    return QStringLiteral(CHARIS_SWITCH_VERSION);
+    // CHARIS_TEST_VERSION: automated checks of the updater pretend to be an older version
+    const QString test = qEnvironmentVariable("CHARIS_TEST_VERSION");
+    return test.isEmpty() ? QStringLiteral(CHARIS_SWITCH_VERSION) : test;
 }
 
 QString CharisUpdater::FolderId(const QString& link) {
@@ -76,10 +80,48 @@ void CharisUpdater::Check() {
     const QString folder_id = QString::fromLatin1(UpdateFolderId);
     busy = true;
     found_version.clear();
-    found_file_id.clear();
+    found_url.clear();
     open_listings = 0;
-    emit Status(QStringLiteral("Procurando no Google Drive..."), false);
+    emit Status(QStringLiteral("Procurando atualizações..."), false);
+    CheckServer();
     ListFolder(folder_id, 0);
+}
+
+void CharisUpdater::Consider(const QString& version, const QString& url) {
+    const QVersionNumber best = QVersionNumber::fromString(
+        found_version.isEmpty() ? CurrentVersion() : found_version);
+    if (QVersionNumber::fromString(version) > best) {
+        found_version = version;
+        found_url = url;
+    }
+}
+
+// pc.txt on the account server: "versao=1.2.3" and "arquivo=CharisSwitch-1.2.3-instalador.exe"
+void CharisUpdater::CheckServer() {
+    ++open_listings;
+    QNetworkReply* reply =
+        net->get(MakeRequest(QString::fromLatin1(UpdateServer) + QStringLiteral("pc.txt")));
+    connect(reply, &QNetworkReply::finished, this, [this, reply] {
+        reply->deleteLater();
+        if (reply->error() == QNetworkReply::NoError) {
+            QString version;
+            QString file;
+            for (const QString& line : QString::fromUtf8(reply->readAll()).split(QLatin1Char('\n'))) {
+                const QString trimmed = line.trimmed();
+                if (trimmed.startsWith(QStringLiteral("versao="))) {
+                    version = trimmed.mid(7);
+                } else if (trimmed.startsWith(QStringLiteral("arquivo="))) {
+                    file = trimmed.mid(8);
+                }
+            }
+            if (InstallerName.match(file).hasMatch() && !version.isEmpty()) {
+                Consider(version, QString::fromLatin1(UpdateServer) + file);
+            }
+        }
+        if (--open_listings == 0) {
+            FinishListing();
+        }
+    });
 }
 
 // Reads the public folder page; installers are compared by version and subfolders are
@@ -96,10 +138,6 @@ void CharisUpdater::ListFolder(const QString& folder_id, int depth) {
                 QStringLiteral("<div class=\"flip-entry-title\">([^<]*)</div>"));
             const QStringList entries =
                 html.split(QStringLiteral("class=\"flip-entry\" id=\"entry-"));
-            const QVersionNumber current = QVersionNumber::fromString(CurrentVersion());
-            QVersionNumber best = found_version.isEmpty()
-                                      ? current
-                                      : QVersionNumber::fromString(found_version);
             for (qsizetype i = 1; i < entries.size(); ++i) {
                 const QString& chunk = entries[i];
                 const QString id = chunk.left(chunk.indexOf(QLatin1Char('"')));
@@ -118,17 +156,11 @@ void CharisUpdater::ListFolder(const QString& folder_id, int depth) {
                 if (!name_match.hasMatch()) {
                     continue;
                 }
-                const QVersionNumber version = QVersionNumber::fromString(name_match.captured(1));
-                if (version > best) {
-                    best = version;
-                    found_version = name_match.captured(1);
-                    found_file_id = id;
-                }
+                Consider(name_match.captured(1),
+                         QStringLiteral("https://drive.usercontent.google.com/download?id=%1"
+                                        "&export=download&confirm=t")
+                             .arg(id));
             }
-        } else if (depth == 0) {
-            emit Status(QStringLiteral("Não consegui abrir a pasta. Confira o link e se ela "
-                                       "está compartilhada com \"Qualquer pessoa com o link\"."),
-                        true);
         }
         if (--open_listings == 0) {
             FinishListing();
@@ -152,7 +184,7 @@ void CharisUpdater::FinishListing() {
 }
 
 void CharisUpdater::Download() {
-    if (busy || found_file_id.isEmpty()) {
+    if (busy || found_url.isEmpty()) {
         return;
     }
     busy = true;
@@ -162,9 +194,7 @@ void CharisUpdater::Download() {
     QDir().mkpath(dir);
     installer_path = dir + QStringLiteral("/CharisSwitch-%1-instalador.exe").arg(found_version);
 
-    QNetworkReply* reply = net->get(MakeRequest(
-        QStringLiteral("https://drive.usercontent.google.com/download?id=%1&export=download&confirm=t")
-            .arg(found_file_id)));
+    QNetworkReply* reply = net->get(MakeRequest(found_url));
     connect(reply, &QNetworkReply::downloadProgress, this, &CharisUpdater::Progress);
     connect(reply, &QNetworkReply::finished, this, [this, reply] {
         reply->deleteLater();

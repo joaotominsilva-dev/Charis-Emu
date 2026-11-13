@@ -12,7 +12,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 
 APP_TITLE   := Charis Stream
 APP_AUTHOR  := Charis
-APP_VERSION := 2.0.2
+APP_VERSION := $(shell sed -n 's/.*CHARIS_APP_VERSION "\(.*\)"/\1/p' $(TOPDIR)/source/version.h)
 ICON        := icon.jpg
 
 TARGET      := charis-stream
