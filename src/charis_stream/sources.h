@@ -25,6 +25,9 @@ public:
     void Apply(const InputState& state, bool with_pointer = true);
     // Lets go of any button still held (the Switch disconnected or left desktop mode).
     void Release();
+    // The Switch's touch screen as a touch screen for the PC: the pointer goes where the finger
+    // is and the left button is held while it touches (to pick a game on the home screen)
+    void TouchAsMouse(const InputState& state);
 
 private:
     bool have_previous = false;
@@ -33,6 +36,7 @@ private:
     uint8_t mouse_buttons = 0;
     int32_t wheel = 0;
     uint32_t last_key_sequence = 0;
+    bool touch_down = false;
 };
 
 } // namespace CharisStream

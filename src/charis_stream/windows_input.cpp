@@ -8,6 +8,7 @@
 namespace CharisStream {
 void DesktopInput::Apply(const InputState&, bool) {}
 void DesktopInput::Release() {}
+void DesktopInput::TouchAsMouse(const InputState&) {}
 } // namespace CharisStream
 
 #else
@@ -199,8 +200,32 @@ void DesktopInput::Apply(const InputState& state, bool with_pointer) {
 }
 
 
+void DesktopInput::TouchAsMouse(const InputState& state) {
+    std::vector<INPUT> inputs;
+    if (state.touch_count > 0) {
+        INPUT move{};
+        move.type = INPUT_MOUSE;
+        move.mi.dx = state.touches[0].x;
+        move.mi.dy = state.touches[0].y;
+        move.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
+        inputs.push_back(move);
+        if (!touch_down) {
+            MouseButtonInput(inputs, MOUSEEVENTF_LEFTDOWN);
+            touch_down = true;
+        }
+    } else if (touch_down) {
+        MouseButtonInput(inputs, MOUSEEVENTF_LEFTUP);
+        touch_down = false;
+    }
+    Send(inputs);
+}
+
 void DesktopInput::Release() {
     std::vector<INPUT> inputs;
+    if (touch_down) {
+        MouseButtonInput(inputs, MOUSEEVENTF_LEFTUP);
+        touch_down = false;
+    }
     if (mouse_buttons & MouseLeft) {
         MouseButtonInput(inputs, MOUSEEVENTF_LEFTUP);
     }

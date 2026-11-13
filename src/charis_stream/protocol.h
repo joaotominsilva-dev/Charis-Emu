@@ -28,6 +28,7 @@ enum class Type : uint8_t {
     Hello = 3,    // Switch -> PC: start a session (proves it has the account key)
     Welcome = 4,  // PC -> Switch: session accepted (proves the same)
     Punch = 5,    // either way: opens the sender's router for the other side
+    Launching = 6, // PC (Charis Switch closed) -> Switch: opening Charis Switch, keep trying
 
     // Encrypted with the session keys
     Start = 16,           // Switch -> PC: begin streaming with these settings
@@ -36,6 +37,7 @@ enum class Type : uint8_t {
     Stop = 19,            // either side: the session ends
     GoHome = 20,          // Switch -> PC: close the game and show the Charis home screen
     SetBitrate = 21,      // Switch -> PC: the network asks for less (or allows more)
+    Notice = 22,          // PC -> Switch: a problem on the PC, as text for the screen (UTF-8)
     Video = 32,           // PC -> Switch: one piece of an H.264 frame, or parity for it
     Audio = 33,           // PC -> Switch: one Opus packet, 48 kHz stereo
     Input = 40,           // Switch -> PC: controller, touch, mouse and keys
@@ -73,6 +75,13 @@ struct Hello {
 struct Welcome {
     uint8_t client_nonce[16];
     uint8_t host_nonce[16];
+    uint8_t proof[16];
+};
+
+// The answer to a Hello while Charis Switch is closed on the PC: its helper opens it, and the
+// Switch keeps saying Hello until the program answers. proof = LaunchingProof(key, nonce).
+struct Launching {
+    uint8_t client_nonce[16];
     uint8_t proof[16];
 };
 

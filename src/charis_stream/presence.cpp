@@ -205,7 +205,9 @@ void Presence::Run() {
         const std::string error = account.HostPoll(token, host_id, name, addresses,
                                                    host.PublicAddress(), requests, next_poll_ms,
                                                    playing);
-        wait_ms = next_poll_ms;
+        // 10 s is the server's "nobody is looking" pace; anything shorter means a Switch is
+        wait_ms = next_poll_ms >= 10000 ? std::max(next_poll_ms, idle_poll_ms.load())
+                                        : next_poll_ms;
         if (error.empty()) {
             next.online = true;
             next.login_expired = false;

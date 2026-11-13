@@ -45,6 +45,9 @@ struct HostConfig {
     Key32 key{};                      // the account's stream key
     std::array<uint8_t, 8> host_id{}; // stable id of this PC
     uint16_t port = HostPort;
+    // The helper that runs while Charis Switch is closed: it is listed like the PC and answers a
+    // Switch's Hello with Launching (calling on_launch) instead of starting a session
+    bool launcher = false;
 };
 
 struct HostCallbacks {
@@ -55,6 +58,7 @@ struct HostCallbacks {
     std::function<void(bool connected, const std::string& client_name)> on_session;
     std::function<void(const std::string& message)> on_error;
     std::function<void(Type command)> on_command; // Type::GoHome
+    std::function<void(const std::string& client_name)> on_launch; // launcher mode only
 };
 
 class Host {
@@ -112,6 +116,7 @@ private:
     std::vector<Pending> pending;
     Address public_address;
     std::vector<std::pair<Address, int64_t>> punch_targets; // address, stop sending at
+    int64_t last_launch_ms = 0; // launcher mode: one launch at a time
 };
 
 } // namespace CharisStream

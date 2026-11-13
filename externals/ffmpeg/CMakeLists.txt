@@ -58,7 +58,7 @@ if (NOT YUZU_USE_BUNDLED_FFMPEG)
             list(APPEND FFmpeg_CROSS_COMPILE_FLAGS
                 --enable-ffnvcodec --enable-nvenc --enable-encoder=h264_nvenc
                 --enable-d3d11va --enable-filter=ddagrab --enable-filter=scale_d3d11
-                --enable-filter=buffersink --enable-filter=format)
+                --enable-filter=buffersink --enable-filter=format --enable-filter=hwdownload)
         endif()
         if (DEFINED FFmpeg_CROSS_PREFIX)
             list(APPEND FFmpeg_CROSS_COMPILE_FLAGS --cross-prefix="${FFmpeg_CROSS_PREFIX}")

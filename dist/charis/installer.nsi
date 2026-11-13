@@ -212,6 +212,13 @@ Section "Charis Switch" SecMain
   SectionIn RO
   SetOutPath "$INSTDIR"
 
+  ; The helper (CharisSwitchAgent.exe) is replaced too: ask it to quit first
+  ${If} ${FileExists} "$INSTDIR\CharisSwitchAgent.exe"
+    nsExec::Exec '"$INSTDIR\CharisSwitchAgent.exe" --stop'
+    Pop $0
+    nsExec::Exec 'taskkill /IM CharisSwitchAgent.exe /F'
+    Pop $0
+  ${EndIf}
   Call WaitForProgramToClose
   Delete "$INSTDIR\eglantine.exe"
   File /r "${BINARY_SOURCE_DIR}\*"
@@ -258,6 +265,14 @@ SectionEnd
 
 Section -Post
   WriteUninstaller "$INSTDIR\desinstalar.exe"
+
+  ; Start the helper again when Charis Switch had turned it on (it starts with Windows)
+  ReadRegStr $0 HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Charis Switch"
+  ${If} $0 != ""
+  ${AndIf} ${FileExists} "$INSTDIR\CharisSwitchAgent.exe"
+    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Charis Switch" '"$INSTDIR\CharisSwitchAgent.exe"'
+    Exec '"$INSTDIR\CharisSwitchAgent.exe"'
+  ${EndIf}
 
   ; Reopen the program after an update started from inside it
   ${GetParameters} $R0

@@ -95,6 +95,7 @@ private:
     uint64_t game_program = 0;
     qint64 game_started_ms = 0;
     std::atomic<bool> streamed_this_game{false}; // set from the host thread
+    std::atomic<bool> game_running{false};
     qint64 session_started_ms = 0;               // host thread
     std::string session_via;                     // host thread
 };

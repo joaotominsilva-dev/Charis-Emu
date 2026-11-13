@@ -45,6 +45,12 @@ void SetPcName(const QString& name);
 // Whether the Switch may connect to this PC while Charis Switch is open
 bool Available();
 void SetAvailable(bool available);
+// Whether the Switch may open Charis Switch when it is closed (through the helper that starts
+// with Windows)
+bool OpenFromSwitch();
+void SetOpenFromSwitch(bool open);
+// Starts or stops the helper, and its start with Windows, to match the account and settings
+void SyncHelper();
 } // namespace CharisAccountStore
 
 // Log in or create the account, then see whether the Switch can reach this PC.
@@ -58,6 +64,7 @@ signals:
     void LoggedIn(const CharisAccountData& account);
     void LoggedOut();
     void AvailabilityChanged(bool available);
+    void OpenFromSwitchChanged(bool open);
     void PcNameChanged(const QString& name);
 
 private:
@@ -88,6 +95,7 @@ private:
     QLabel* status_preview = nullptr;
     QLabel* status_detail = nullptr;
     QCheckBox* available_box = nullptr;
+    QCheckBox* open_box = nullptr;
     QLineEdit* name_edit = nullptr;
 };
 

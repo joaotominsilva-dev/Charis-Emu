@@ -33,6 +33,7 @@
 #include "main_window.h"
 
 #ifdef _WIN32
+#include <windows.h>
 #include <QScreen>
 
 static void OverrideWindowsFont() {
@@ -144,6 +145,22 @@ static void LoadNx2Switches(const char* argv0) {
 
 int main(int argc, char* argv[]) {
     LoadNx2Switches(argv[0]);
+
+    // Charis Stream: opened by the helper because the Switch asked; not an emulator option
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--from-switch") == 0) {
+            for (int j = i; j + 1 < argc; ++j) {
+                argv[j] = argv[j + 1];
+            }
+            --argc;
+            break;
+        }
+    }
+#ifdef _WIN32
+    // Tells the Charis Switch helper that the program is open (it then leaves the Switch to it)
+    static const HANDLE charis_open = CreateMutexW(nullptr, FALSE, L"Local\\CharisSwitchApp");
+    (void)charis_open;
+#endif
 
 #if YUZU_ROOM
     bool launch_room = false;

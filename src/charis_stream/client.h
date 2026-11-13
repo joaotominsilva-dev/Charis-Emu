@@ -67,6 +67,10 @@ public:
         return state;
     }
     std::string FailureReason() const;
+    // A problem the PC reported in words (no picture: why), "" when none
+    std::string Notice() const;
+    // Charis Switch was closed on the PC and its helper is opening it
+    bool PcLaunching() const;
     ClientStats Stats() const;
 
     void SendInput(InputState input); // the sequence number is filled in here
@@ -128,6 +132,8 @@ private:
     uint8_t client_nonce[16]{};
     int64_t connect_started_ms = 0;
     bool have_keys = false;
+    bool pc_launching = false;
+    std::string notice;
 
     mutable std::mutex send_mutex; // peer, keys and counter for sending
     Address peer;

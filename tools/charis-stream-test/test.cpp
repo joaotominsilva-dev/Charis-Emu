@@ -706,6 +706,70 @@ void OfflineTests(const AccountKeys& keys) {
     std::system("pkill -f 'dev-server.mjs 8799'");
 }
 
+
+// Charis Switch is closed: its helper answers the Switch with "launching", steps aside, and the
+// program (here, a normal host on the same port) takes the connection over
+void LauncherTests(const AccountKeys& keys) {
+    std::printf("== Charis Switch fechado no PC (ajudante)\n");
+    const uint16_t port = 48123;
+    HostConfig config;
+    config.name = "PC do ajudante";
+    config.key = keys.stream_key;
+    config.port = port;
+    config.launcher = true;
+    std::atomic<bool> launch{false};
+    HostCallbacks helper_callbacks;
+    helper_callbacks.on_launch = [&](const std::string&) { launch = true; };
+    auto helper = std::make_unique<Host>(config, helper_callbacks);
+    std::string error;
+    Check(helper->Start(error), "ajudante escutando");
+
+    ClientCallbacks client_callbacks;
+    std::atomic<int> frames{0};
+    client_callbacks.on_video = [&](const uint8_t*, size_t, bool) { ++frames; };
+    Client client{keys.stream_key, "Switch de teste", client_callbacks};
+    client.Open(error);
+    StartRequest settings{};
+    settings.width = 1280;
+    settings.height = 720;
+    settings.fps = 60;
+    settings.bitrate_kbps = 8000;
+    Address target;
+    target.ip = Address::Parse("127.0.0.1:1").ip;
+    target.port = port;
+    const int64_t asked = NowMs();
+    client.Connect({target}, settings);
+    int64_t until = NowMs() + 3000;
+    while (NowMs() < until && !launch) {
+        Sleep(20);
+    }
+    Check(launch, "o ajudante recebe o pedido do Switch e manda abrir o Charis Switch");
+    Sleep(300);
+    Check(client.PcLaunching(), "o Switch fica sabendo que o programa está abrindo");
+    helper->Stop();
+    helper.reset();
+
+    // The program takes 8 s to open (a slow PC): longer than a normal connection would wait
+    Sleep(8000);
+    HostConfig app_config = config;
+    app_config.launcher = false;
+    std::atomic<int> bitrate{0};
+    HostCallbacks app_callbacks;
+    app_callbacks.make_video = [&] { return std::make_unique<FakeVideo>(&bitrate); };
+    app_callbacks.make_audio = [] { return std::make_unique<FakeAudio>(); };
+    Host app{app_config, app_callbacks};
+    Check(app.Start(error), "o Charis Switch abre e fica com a porta");
+    until = NowMs() + 30000;
+    while (NowMs() < until && (client.GetState() != Client::State::Streaming || frames < 30)) {
+        Sleep(20);
+    }
+    Check(client.GetState() == Client::State::Streaming && frames >= 30,
+          "o Switch conecta sozinho no programa aberto e recebe a imagem (" +
+              std::to_string((NowMs() - asked) / 1000) + " s no total)");
+    client.Close();
+    app.Stop();
+}
+
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     const bool quick = argc > 1 && std::strcmp(argv[1], "--quick") == 0;
@@ -716,6 +780,7 @@ int main(int argc, char** argv) {
     if (!account_only) {
         StreamTests(keys, other, quick);
     }
+    LauncherTests(keys);
     AccountTests(keys, other);
     if (std::getenv("CHARIS_UPNP_TEST")) {
         UpnpTests();

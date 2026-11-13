@@ -12,6 +12,7 @@ namespace CharisStream {
 namespace {
 
 constexpr int ConnectForMs = 20000;
+constexpr int LaunchExtraMs = 25000; // Charis Switch takes a few seconds to open on the PC
 constexpr int HelloEveryMs = 250;
 constexpr int StartEveryMs = 300;
 constexpr int KeyframeRequestEveryMs = 300;
@@ -83,6 +84,16 @@ Address Client::PublicAddress() const {
     return public_address;
 }
 
+std::string Client::Notice() const {
+    std::scoped_lock lock{mutex};
+    return notice;
+}
+
+bool Client::PcLaunching() const {
+    std::scoped_lock lock{mutex};
+    return pc_launching;
+}
+
 std::string Client::FailureReason() const {
     std::scoped_lock lock{mutex};
     return failure;
@@ -101,6 +112,8 @@ void Client::Connect(const std::vector<Address>& list, const StartRequest& wante
         RandomBytes(client_nonce, sizeof(client_nonce));
         connect_started_ms = NowMs();
         have_keys = false;
+        pc_launching = false;
+        notice.clear();
         failure.clear();
         stats = {};
         stats.bitrate_kbps = wanted.bitrate_kbps;
@@ -382,6 +395,21 @@ void Client::HandleClear(const Header& header, const uint8_t* body, long size,
         it->seen_ms = NowMs();
         return;
     }
+    if (header.type == Type::Launching && size >= static_cast<long>(sizeof(Launching)) &&
+        state == State::Connecting) {
+        // Charis Switch was closed on the PC and is being opened: wait for it a while longer
+        Launching launching;
+        std::memcpy(&launching, body, sizeof(launching));
+        std::scoped_lock lock{mutex};
+        const Tag16 expected = LaunchingProof(key, launching.client_nonce);
+        if (std::memcmp(launching.client_nonce, client_nonce, 16) == 0 &&
+            EqualConstantTime(launching.proof, expected.data(), expected.size()) &&
+            !pc_launching) {
+            pc_launching = true;
+            connect_started_ms = NowMs() + LaunchExtraMs;
+        }
+        return;
+    }
     if (header.type != Type::Welcome || size < static_cast<long>(sizeof(Welcome)) ||
         state != State::Connecting) {
         return;
@@ -445,6 +473,11 @@ void Client::HandleSealed(const uint8_t* packet, size_t size, const Header& head
     case Type::Stop:
         Fail("O PC encerrou a transmissão.");
         break;
+    case Type::Notice: {
+        std::scoped_lock lock{mutex};
+        notice.assign(reinterpret_cast<const char*>(plain), static_cast<size_t>(payload));
+        break;
+    }
     default:
         break;
     }

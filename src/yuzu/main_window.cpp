@@ -1054,9 +1054,17 @@ void MainWindow::InitializeWidgets() {
     const auto open_account = [this, start_stream, update_stream_pill] {
         CharisAccountDialog dialog(charis_stream, this);
         connect(&dialog, &CharisAccountDialog::LoggedIn, this,
-                [start_stream](const CharisAccountData&) { start_stream(); });
+                [start_stream](const CharisAccountData&) {
+                    start_stream();
+                    CharisAccountStore::SyncHelper();
+                });
         connect(&dialog, &CharisAccountDialog::AvailabilityChanged, this,
-                [start_stream](bool) { start_stream(); });
+                [start_stream](bool) {
+                    start_stream();
+                    CharisAccountStore::SyncHelper();
+                });
+        connect(&dialog, &CharisAccountDialog::OpenFromSwitchChanged, this,
+                [](bool) { CharisAccountStore::SyncHelper(); });
         connect(&dialog, &CharisAccountDialog::PcNameChanged, this,
                 [start_stream](const QString&) { start_stream(); });
         connect(&dialog, &CharisAccountDialog::LoggedOut, this, [this, update_stream_pill] {
@@ -1072,6 +1080,7 @@ void MainWindow::InitializeWidgets() {
                 }
             });
             update_stream_pill();
+            CharisAccountStore::SyncHelper();
         });
         dialog.exec();
         update_stream_pill();
@@ -1081,16 +1090,26 @@ void MainWindow::InitializeWidgets() {
     connect(charis_header, &CharisHeader::StreamClicked, this, open_account);
     connect(charis_stream, &CharisStreamController::PresenceChanged, this, update_stream_pill);
     connect(charis_stream, &CharisStreamController::LoginExpired, this, update_stream_pill);
+    auto stream_fullscreen = std::make_shared<bool>(false);
     connect(charis_stream, &CharisStreamController::SessionChanged, this,
-            [this, update_stream_pill](bool connected, const QString&) {
+            [this, update_stream_pill, stream_fullscreen](bool connected, const QString&) {
                 update_stream_pill();
                 if (connected) {
-                    // The Switch sees the main monitor: put Charis Switch in front of it
-                    if (isMinimized()) {
+                    // The Switch sees the main monitor: Charis Switch in front of it, and the
+                    // game catalog filling the screen when no game is open
+                    if (!emulation_running && !isFullScreen()) {
+                        *stream_fullscreen = true;
+                        showFullScreen();
+                    } else if (isMinimized()) {
                         showMaximized();
                     }
                     raise();
                     activateWindow();
+                } else if (*stream_fullscreen) {
+                    *stream_fullscreen = false;
+                    if (!emulation_running && isFullScreen()) {
+                        showMaximized();
+                    }
                 }
             });
     connect(charis_stream, &CharisStreamController::TouchesChanged, this,
@@ -1117,7 +1136,10 @@ void MainWindow::InitializeWidgets() {
             });
     charis_header->SetStreamAvailable(true);
     ui->menu_Emulation->addAction(stream_action);
-    QTimer::singleShot(0, this, start_stream);
+    QTimer::singleShot(0, this, [start_stream] {
+        start_stream();
+        CharisAccountStore::SyncHelper();
+    });
 
     auto* smooth_action = new QAction(QStringLiteral("Ativar modo fluido"), this);
     connect(smooth_action, &QAction::triggered, this, [this] {

@@ -222,12 +222,14 @@ void CharisStreamController::GameStarted(const QString& title, uint64_t program_
     game_program = program_id;
     game_started_ms = QDateTime::currentMSecsSinceEpoch();
     streamed_this_game = IsStreaming();
+    game_running = true;
     if (presence) {
         presence->SetGame(title.toStdString());
     }
 }
 
 void CharisStreamController::GameStopped() {
+    game_running = false;
     if (game_title.isEmpty()) {
         return;
     }
@@ -338,6 +340,11 @@ void CharisStreamController::OnInput(const CharisStream::InputState& state) {
                                   state.right_y / 32767.0f);
     }
 
+    // No game open: the touch screen picks things on the Charis Switch home screen
+    if (!game_running) {
+        desktop_input.TouchAsMouse(state);
+        return;
+    }
     const uint8_t touch_count = std::min<uint8_t>(state.touch_count, CharisStream::MaxTouches);
     if (!SameTouches(touch_count, state.touches, last_touch_count, last_touches)) {
         QList<QPointF> points;

@@ -34,6 +34,8 @@ Tag16 HelloProof(const Key32& stream_key, const uint8_t client_nonce[16]);
 Tag16 WelcomeProof(const Key32& stream_key, const uint8_t client_nonce[16],
                    const uint8_t host_nonce[16]);
 
+Tag16 LaunchingProof(const Key32& stream_key, const uint8_t client_nonce[16]);
+
 struct SessionKeys {
     Key32 client_to_host{};
     Key32 host_to_client{};

@@ -4,4 +4,4 @@
 #pragma once
 
 // The Makefile reads APP_VERSION from here too
-#define CHARIS_APP_VERSION "2.0.3"
+#define CHARIS_APP_VERSION "2.0.4"

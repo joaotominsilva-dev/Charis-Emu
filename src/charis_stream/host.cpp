@@ -258,6 +258,26 @@ void Host::HandleClear(const Header& header, const uint8_t* body, long size,
         return;
     }
 
+    if (config.launcher) {
+        // Charis Switch is closed: say it is being opened, and open it (once per few seconds;
+        // the Switch repeats its Hello until the program itself answers)
+        Launching launching{};
+        std::memcpy(launching.client_nonce, hello.client_nonce, 16);
+        const Tag16 proof = LaunchingProof(config.key, hello.client_nonce);
+        std::memcpy(launching.proof, proof.data(), proof.size());
+        uint8_t reply[sizeof(Header) + sizeof(Launching)];
+        const size_t offset = WriteHeader(reply, Type::Launching);
+        std::memcpy(reply + offset, &launching, sizeof(launching));
+        socket.SendTo(from, reply, sizeof(reply));
+        const int64_t now = NowMs();
+        if (now - last_launch_ms > 15000 && callbacks.on_launch) {
+            last_launch_ms = now;
+            hello.name[sizeof(hello.name) - 1] = 0;
+            callbacks.on_launch(hello.name);
+        }
+        return;
+    }
+
     Welcome welcome{};
     {
         std::scoped_lock lock{mutex};
@@ -435,8 +455,19 @@ void Host::VideoLoop(std::shared_ptr<Session> current) {
     if (!source || !source->Open(current->settings.width, current->settings.height,
                                  current->settings.fps,
                                  static_cast<int>(current->settings.bitrate_kbps), error)) {
+        if (error.empty()) {
+            error = "Não foi possível capturar a tela.";
+        }
         if (callbacks.on_error) {
-            callbacks.on_error(error.empty() ? "Não foi possível capturar a tela." : error);
+            callbacks.on_error(error);
+        }
+        // Tell the Switch why there is no picture (a few times: packets can get lost)
+        std::vector<uint8_t> scratch(SealOverhead + 1100);
+        const size_t size = std::min<size_t>(error.size(), 1100);
+        for (int i = 0; i < 4 && current->active; ++i) {
+            SendSealed(*current, Type::Notice, reinterpret_cast<const uint8_t*>(error.data()),
+                       size, scratch.data());
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
         }
         return;
     }

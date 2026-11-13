@@ -50,6 +50,11 @@ public:
     std::string Token() const;
     // The game running now ("" for none), shown on the account's web panel
     void SetGame(const std::string& title);
+    // How long to wait between calls while no Switch is looking (the helper that runs all day
+    // calls less often, to stay within the free plan of the account server)
+    void SetIdlePollMs(int ms) {
+        idle_poll_ms = ms;
+    }
 
 private:
     void Loop();
@@ -73,6 +78,7 @@ private:
     std::condition_variable wake;
     bool poke = false;
     std::string game;
+    std::atomic<int> idle_poll_ms{10000};
     Credentials credentials;
     mutable std::mutex status_mutex;
     Status status;

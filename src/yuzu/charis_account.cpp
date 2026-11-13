@@ -4,6 +4,9 @@
 #include <cstring>
 
 #include <QCheckBox>
+#include <QCoreApplication>
+#include <QFileInfo>
+#include <QProcess>
 #include <QDir>
 #include <QFutureWatcher>
 #include <QHBoxLayout>
@@ -201,6 +204,35 @@ void SetPcName(const QString& name) {
     settings.setValue(QStringLiteral("pc/name"), name.trimmed().left(40));
 }
 
+bool OpenFromSwitch() {
+    QSettings settings(AccountFile(), QSettings::IniFormat);
+    return settings.value(QStringLiteral("pc/open_from_switch"), true).toBool();
+}
+
+void SetOpenFromSwitch(bool open) {
+    QSettings settings(AccountFile(), QSettings::IniFormat);
+    settings.setValue(QStringLiteral("pc/open_from_switch"), open);
+}
+
+void SyncHelper() {
+#ifdef _WIN32
+    const QString helper = QDir::toNativeSeparators(QCoreApplication::applicationDirPath() +
+                                                    QStringLiteral("/CharisSwitchAgent.exe"));
+    QSettings run(QStringLiteral("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\"
+                                 "CurrentVersion\\Run"),
+                  QSettings::NativeFormat);
+    const bool wanted = Load().IsLoggedIn() && Available() && OpenFromSwitch() &&
+                        QFileInfo::exists(helper);
+    if (!wanted) {
+        run.remove(QStringLiteral("Charis Switch"));
+        return; // a running helper sees the change and goes quiet by itself
+    }
+    run.setValue(QStringLiteral("Charis Switch"), QStringLiteral("\"%1\"").arg(helper));
+    // Start it now too (it keeps a single copy running by itself)
+    QProcess::startDetached(helper, {});
+#endif
+}
+
 bool Available() {
     QSettings settings(AccountFile(), QSettings::IniFormat);
     return settings.value(QStringLiteral("pc/available"), true).toBool();
@@ -309,6 +341,13 @@ CharisAccountDialog::CharisAccountDialog(CharisStreamController* controller_, QW
     status_layout->addWidget(name_edit);
     available_box = new QCheckBox(QStringLiteral("Deixar este PC disponível para o Switch"), status);
     status_layout->addWidget(available_box);
+    open_box = new QCheckBox(
+        QStringLiteral("Abrir o Charis Switch pelo Switch, mesmo com ele fechado aqui"), status);
+    status_layout->addWidget(open_box);
+    connect(open_box, &QCheckBox::toggled, this, [this](bool on) {
+        CharisAccountStore::SetOpenFromSwitch(on);
+        emit OpenFromSwitchChanged(on);
+    });
     auto* panel_link = new QLabel(
         QStringLiteral("Seu histórico, jogos e aparelhos: <a href=\"https://charis-conta.netlify.app\">"
                        "charis-conta.netlify.app</a>"),
@@ -399,6 +438,8 @@ void CharisAccountDialog::ShowStatus() {
     pages->setCurrentIndex(1);
     const QSignalBlocker blocker(available_box);
     available_box->setChecked(CharisAccountStore::Available());
+    const QSignalBlocker open_blocker(open_box);
+    open_box->setChecked(CharisAccountStore::OpenFromSwitch());
     name_edit->setText(CharisAccountStore::PcName());
     UpdateStatus();
 }

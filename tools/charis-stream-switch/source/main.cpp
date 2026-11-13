@@ -225,6 +225,7 @@ private:
     int64_t combo_since = 0;
     bool combo_latched = false;
     int64_t last_stats_log = 0;
+    std::string last_notice;
     std::string toast;
     int64_t toast_until = 0;
     int64_t help_until = 0;
@@ -966,7 +967,8 @@ void App::ConnectingFrame(uint64_t pressed) {
     }
     const Client::State state = client->GetState();
     if (state == Client::State::Streaming) {
-        Platform::Log("conectado em %lld ms", static_cast<long long>(now - connect_started));
+        Platform::Log("conectado em %lld ms%s", static_cast<long long>(now - connect_started),
+                      client->PcLaunching() ? " (o PC abriu o Charis Switch)" : "");
         screen = Screen::Streaming;
         desktop = false;
         menu_open = false;
@@ -1004,7 +1006,9 @@ void App::DrawConnecting() {
     ui.Dots(72 + ui.Measure(ui.title, target.name) + 26, 262, Ink, Now());
     const int64_t elapsed = now - connect_started;
     std::string step;
-    if (target.home) {
+    if (client && client->PcLaunching()) {
+        step = "O Charis Switch estava fechado no PC: abrindo ele agora. Leva alguns segundos.";
+    } else if (target.home) {
         step = "Pela rede de casa.";
     } else if (elapsed < 4000) {
         step = "Pela internet: avisando o PC pela sua conta.";
@@ -1210,10 +1214,19 @@ void App::DrawStreaming() {
         std::snprintf(line, sizeof(line), "Conectado. Quadros recebidos do PC: %u. %s.",
                       stats.frames, video.Status().c_str());
         ui.Paragraph(ui.body, line, 72, 300, 1136, InkSoft);
-        if (stats.frames == 0 && now - connect_started > 6000) {
+        const std::string notice = client ? client->Notice() : std::string{};
+        if (!notice.empty()) {
+            // The PC says what went wrong: show it as it came
+            ui.Box({64, 360, ScreenW - 128, 260}, 22, Cream2);
+            ui.Paragraph(ui.small, notice, 92, 380, ScreenW - 184, Danger, 4);
+            if (notice != last_notice) {
+                last_notice = notice;
+                Platform::Log("aviso do PC: %s", notice.c_str());
+            }
+        } else if (stats.frames == 0 && now - connect_started > 8000) {
             ui.Paragraph(ui.body,
-                         "O PC aceitou a conexão, mas não está mandando a imagem. No PC, veja se "
-                         "a placa de vídeo é NVIDIA e se o driver está atualizado.",
+                         "O PC aceitou a conexão, mas ainda não mandou a imagem. Atualize o "
+                         "Charis Switch no PC para a versão mais nova.",
                          72, 380, 1136, InkSoft);
         }
     }
